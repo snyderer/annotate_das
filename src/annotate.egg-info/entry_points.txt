@@ -1,0 +1,2 @@
+[console_scripts]
+annotate = annotate.main:run

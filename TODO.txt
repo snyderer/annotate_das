@@ -1,0 +1,8 @@
+GUI TO DO:
+-Denoising 
+	- Gabor filters? (probably not)
+Thoughts on GUI improvements for Blue whales:
+-Select "c_min" and "c_max" values for narrowing in on calls
+-allow for upward or downward propagation only to more easily isolate sounds
+-Select bandwidth to isolate specific call types
+-(more complicated) select f-x and spectrogram plots first, and built TX contours from those	- 

@@ -1,0 +1,27 @@
+I have a GUI to visualize and annotate DAS data with several panels organized like this:
+
+annotate/src/annotate/
+-init.py
+-config.py (sets up some settings, like plot color scheme and default settings)
+-data_manager.py (loads data/casts to panels)
+-main_window.py (sets up gui figure)
+-main.py (defines run())
+-data_io.py (some loading functions, will eventually be replaced by an import from another repo)
+-run_annotate.py (script to run in debug mode)
+-panels/
+--init.py
+--fx_plot_panel.py
+--fx_series_panel.py
+--control_panel.py
+--text_display_panel.py
+--spectrogram_panel.py
+--tx_plot_panel.py
+
+data_manager.py handles loading data and performing requisite calculations. The control_panel has settings which alter the data displayed in the plot panels. There are three plot types:
+1. T-X plots (in tx_plot_panel) - shows time on the x axis and distance on the y axis, and the color scale represents amplitude of the signal at each point
+2. F-X plots (one shown in fx_plot_panel, several others shown in fx_series_panel) - show distance on the y axis and frequency on the x axis. When a dataset is selected, it is segmented into windows of data based on a variable in control_panel (win_s, default = 2 seconds). Each window is fourier-transformed on the time dimension, and the magnitudes of the positive frequencies are used for each F-X plot. All of the F-X plots are shown in fx_series_panel. The user can click on any of those plots to show a larger version in fx_plot_panel.
+3. spectrograms (shown in spectrogram_panel). The user can press "s" on the keyboard and select a data point on the tx_plot_panel or fx_plot_panel, and the spectrogram panel will show the spectrogram for the corresponding row.
+
+The text_display_panel will display various features, like "cursor mode" (eg 'Select Spectrogram Row' when 's' has been pressed).
+
+I would like help adding more features and fixing some issues. 

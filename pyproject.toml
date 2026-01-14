@@ -1,0 +1,15 @@
+[project]
+name = "annotate"
+version = "0.1.0"
+description = "GUI for plotting preprocessed DAS data, identifying potential signals of interest, and assigning labels"
+authors = [
+    {name="Dr. Eric R. Snyder", email="esnyder@cornell.edu"}
+]
+dependencies = [
+    "PyQt6",
+    "pandas",
+    "pyqtgraph",
+]
+
+[project.scripts]
+annotate = "annotate.main:run"
