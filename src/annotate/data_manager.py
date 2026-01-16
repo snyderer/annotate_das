@@ -377,7 +377,7 @@ class LabelSaver:
                       t, win_length_s, dataset, label, label_name,
                       saved_timestamp=None, username=None):
         """Insert an FX label linked to its parent TX label via tx_id (DB PK) and also store uid."""
-        
+        print('fmin:', f_min_hz, 'fmax:', f_max_hz, 'xmin:', x_min_m, 'xmax:', x_max_m)
         if saved_timestamp is None:
             saved_timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         if username is None:

@@ -1,12 +1,11 @@
 import pandas as pd
 import sqlite3
-db_path = r"C:\Users\ers334\Documents\gitRepos\annotate\A25.db"
-# db_path = r"C:\Users\ers334\Documents\databases\DAS_Annotations\A25.db"
+
+db_path = r"C:\Users\ers334\Documents\databases\DAS_Annotations\A25.db"
 conn = sqlite3.connect(db_path)
 
 query = """
-SELECT count(*)
-FROM tx_labels;
+SELECT * FROM fx_labels LIMIT 1;
 """
 
 df = pd.read_sql_query(query, conn)

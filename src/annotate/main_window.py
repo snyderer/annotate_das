@@ -285,7 +285,7 @@ class MainWindow(QMainWindow):
                     # Save FX labels linked by tx_id and with same uid for external reference
                     if hasattr(self.data_manager, 'annotation_fx_boxes_per_plot'):
                         for idx, coords in enumerate(self.data_manager.annotation_fx_boxes_per_plot):
-                            f_min_hz, f_max_hz, x_min_m, x_max_m = coords
+                            f_min_hz, x_min_m, f_max_hz, x_max_m = coords
                             fx_dataset = self.data_manager.fx_manager.get_dataset()
                             start_t = fx_dataset["t"][idx] if idx < len(fx_dataset["t"]) else 0.0
                             win_s = self.data_manager.get_user_settings('win_s') or 2.0
