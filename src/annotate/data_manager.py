@@ -77,7 +77,8 @@ class PreprocessedDataManager(QObject):
     def navigate(self, direction):
         """Move the 60s window forward/backward by 30s – TX only update."""
         filenames = self.h5settings['file_map']['filename']
-
+        # TODO set self.filepath as the new first file in window
+        
         if direction == 'forward':
             last_idx = self.loaded_files_indices[-1]
             next_idx = last_idx + 1

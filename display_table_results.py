@@ -5,30 +5,27 @@ db_path = r"C:\Users\ers334\Documents\databases\DAS_Annotations\A25.db"
 conn = sqlite3.connect(db_path)
 
 query = """
-SELECT * FROM fx_labels LIMIT 1;
+SELECT * FROM fx_labels
+WHERE label_name LIKE '%Bp%' AND t=14.0;
 """
 
 df = pd.read_sql_query(query, conn)
 
-# conn.execute("""
-#              drop table if exists tx_labels;
-#              """)
-
-# conn.execute("""
-#              drop table if exists fx_labels;
-#              """)
+df2 = pd.read_sql_query("""
+    SELECT distinct(apex_time) FROM tx_labels
+    """, conn)
 
 # Create backup:
 if False:
     cur = conn.cursor()
     query = """
-        CREATE TABLE tx_backup AS
+        CREATE TABLE tx_backup_260119 AS
         Select * FROM tx_labels
     """
     cur.execute(query)
 
     query = """
-        CREATE TABLE fx_backup AS
+        CREATE TABLE fx_backup_260119 AS
         Select * FROM fx_labels
     """
     cur.execute(query)
