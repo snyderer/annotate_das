@@ -57,19 +57,23 @@ class MainWindow(QMainWindow):
 
         # Bottom horizontal split: Spectrogram | Text Panel
         bottom_hsplit = QSplitter(QtCore.Qt.Orientation.Horizontal)
+
         self.spectrogram_panel = SpectrogramPanel(self.data_manager)
         bottom_hsplit.addWidget(self.spectrogram_panel)
 
         self.text_display_panel = TextDisplayPanel()
-        bottom_hsplit.addWidget(self.text_display_panel)
-        middle_vsplit.addWidget(bottom_hsplit)
 
-        # Make text display scrollable:
         scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)  # Make width adjust with splitter
+        scroll_area.setWidgetResizable(True)
         scroll_area.setWidget(self.text_display_panel)
+        scroll_area.setMinimumWidth(220)
+        scroll_area.setMaximumWidth(320)
 
         bottom_hsplit.addWidget(scroll_area)
+
+        middle_vsplit.addWidget(bottom_hsplit)
+
+        # (Removed duplicate scroll area creation and addition)
         # Connect to update file info display
         self.data_manager.file_loaded.connect(self.text_display_panel.update_file_info)
 
@@ -96,6 +100,7 @@ class MainWindow(QMainWindow):
         self.tx_plot_panel.point_clicked.connect(self.on_point_clicked)
         self.fx_plot_panel.point_clicked.connect(self.on_point_clicked)
         self.tx_plot_panel.label_delete_requested.connect(self.on_delete_label)
+        self.fx_plot_panel.roi_changed.connect(self.on_fx_roi_changed)
 
         # === Navigation buttons ===
         self.control_panel.btn_back.clicked.connect(lambda: self.data_manager.navigate('backward'))
@@ -115,6 +120,11 @@ class MainWindow(QMainWindow):
         self.distance_point_2 = None
         self.dist_min = None
         self.dist_max = None
+
+        # F-X bounding-box annotation state
+        self.active_fx_slice_indices = []
+        self.f_min = None
+        self.f_max = None
 
         # Build menu
         self.create_menu()
@@ -153,22 +163,109 @@ class MainWindow(QMainWindow):
             self.data_manager.label_saver = LabelSaver(labels_path)
 
     def on_fx_slice_selected(self, idx):
-        """User clicked an FX series thumbnail."""
-        self.fx_plot_panel.show_slice_from_series(idx)
+        """User clicked an F-X series thumbnail."""
 
-        # Highlight in FX series panel
+        # In F-X box mode, only allow windows overlapping the call.
+        if self.cursor_mode == "fx_boxes":
+            if idx not in self.active_fx_slice_indices:
+                message = (
+                    "This F-X window is outside the selected call time range.\n\n"
+                    "Choose one of the highlighted call windows."
+                )
+                self.statusBar().showMessage(
+                    "Selected F-X window is outside the call time range."
+                )
+                self.text_display_panel.set_annotation_prompt(message)
+                return
+
+        self.fx_plot_panel.show_slice_from_series(idx)
         self.fx_series_panel.highlight_slice(idx)
 
         dataset = self.data_manager.fx_manager.get_dataset()
         times = dataset["t"]
+
         if times is None or idx >= len(times):
             return
-        win_s = self.data_manager.get_user_settings('win_s') or 2.0
+
+        win_s = self.data_manager.get_user_settings("win_s") or 2.0
         t_start = times[idx]
         t_end = t_start + win_s
+
         self.tx_plot_panel.highlight_time_window(t_start, t_end)
-        if hasattr(self.spectrogram_panel, "last_row_idx") and self.spectrogram_panel.last_row_idx is not None:
+
+        if (
+            hasattr(self.spectrogram_panel, "last_row_idx")
+            and self.spectrogram_panel.last_row_idx is not None
+        ):
             self.spectrogram_panel.highlight_time_window(t_start, t_end)
+
+        if self.cursor_mode == "fx_boxes":
+            box_count = len(
+                getattr(self.data_manager, "annotation_rois_per_slice", {}).get(idx, [])
+            )
+
+            self.text_display_panel.set_annotation_prompt(
+                "F-X box labeling mode.\n\n"
+                f"Selected window: {t_start:.2f}–{t_end:.2f} s\n"
+                f"Boxes in this window: {box_count}\n\n"
+                "Double-click: add a box\n"
+                "Ctrl + Click: delete a box\n"
+                "Drag a box to move or resize it.\n\n"
+                "Press Space for the next relevant F-X window.\n\n"
+                "Select another relevant F-X window, or press F when done."
+            )
+
+    def select_next_fx_slice(self):
+        """
+        In F-X box labeling mode, move to the next relevant F-X slice.
+
+        Space advances through the F-X windows that overlap
+        the currently annotated whale call.
+        """
+        if not self.active_fx_slice_indices:
+            message = "No relevant F-X windows are available."
+            self.statusBar().showMessage(message)
+            self.text_display_panel.set_annotation_prompt(message)
+            return
+
+        # The large F-X panel stores the currently displayed slice.
+        current_idx = self.fx_plot_panel.current_slice_idx
+
+        # Ensure indices are sorted in time order.
+        relevant_indices = sorted(self.active_fx_slice_indices)
+
+        try:
+            current_position = relevant_indices.index(current_idx)
+        except ValueError:
+            # If the current plot is not one of the relevant windows,
+            # begin with the first relevant one.
+            self.on_fx_slice_selected(relevant_indices[0])
+            return
+
+        # Move to the next relevant F-X plot.
+        if current_position < len(relevant_indices) - 1:
+            next_idx = relevant_indices[current_position + 1]
+            self.on_fx_slice_selected(next_idx)
+            return
+
+        # Already at the final F-X plot.
+        last_idx = relevant_indices[-1]
+        rois_by_slice = getattr(
+            self.data_manager,
+            "annotation_rois_per_slice",
+            {}
+        )
+        box_count = len(rois_by_slice.get(last_idx, []))
+
+        message = (
+            "Already at the final relevant F-X window.\n\n"
+            f"Boxes in this window: {box_count}\n\n"
+            "Press F when all F-X boxes are complete."
+        )
+        self.statusBar().showMessage(
+            "Already at final relevant F-X window. Press F when done."
+        )
+        self.text_display_panel.set_annotation_prompt(message)
 
     def keyPressEvent(self, event):
         if event.key() == QtCore.Qt.Key.Key_S:
@@ -360,6 +457,19 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     "Distance label done. Select a label and click Confirm & Save."
                 )
+
+        elif event.key() == QtCore.Qt.Key.Key_F:
+            if self.cursor_mode != "fx_boxes":
+                self.start_fx_box_labeling()
+            else:
+                self.finish_fx_box_labeling()
+
+        elif event.key() == QtCore.Qt.Key.Key_Space:
+            if self.cursor_mode == "fx_boxes":
+                self.select_next_fx_slice()
+            else:
+                super().keyPressEvent(event)
+    
         elif event.key() == QtCore.Qt.Key.Key_Escape:
             # Cancel any active mode
             self.cursor_mode = ''
@@ -371,26 +481,6 @@ class MainWindow(QMainWindow):
             self.clear_all_annotation_overlays()           
         else:
             super().keyPressEvent(event)
-
-    def start_apex_labeling(self):
-        self.clear_all_annotation_overlays()
-        self.control_panel.clear_annotation_preview()
-
-        self.cursor_mode = "annotation"
-        self.data_manager.set_cursor_mode(self.cursor_mode)
-
-        self.annotation_stage = "select_apex"
-        self.tx_plot_panel.annotation_mode_active = True
-
-        self.apex_row_idx = None
-        self.apex_point = None
-        self.endpoint_point = None
-
-        self.text_display_panel.update_cursor_mode(
-            "Apex labeling: click the call apex in the T-X plot."
-        )
-        self.statusBar().showMessage("Click the apex of the call.")
-
 
     def on_point_clicked(self, row_idx, col_idx, clicked_distance=None):
         if self.cursor_mode == '':
@@ -605,13 +695,21 @@ class MainWindow(QMainWindow):
 
     def save_annotation(self, label_num):
         """
-        Save the currently selected apex, endpoint, and distance annotations.
+        Save the current T-X annotation and all manually drawn F-X ROI boxes.
 
-        Called by ControlPanel's 'Confirm & Save' button.
+        Required:
+            - apex point
+            - endpoint point
+            - two distance boundary points
+            - non-zero label
+            - valid CSV output path
+
+        F-X boxes are optional. If present, each box is sent to save_fx_label().
+        That method expands the saved TX row's f_min / f_max across all boxes.
         """
 
         # ----------------------------------------------------------
-        # Validate that the annotation is complete.
+        # Validate required T-X annotation values.
         # ----------------------------------------------------------
         if self.apex_point is None:
             message = "Cannot save: select an apex first."
@@ -626,7 +724,7 @@ class MainWindow(QMainWindow):
             return
 
         if self.distance_point_1 is None or self.distance_point_2 is None:
-            message = "Cannot save: select both minimum and maximum distance points."
+            message = "Cannot save: select both distance boundary points first."
             self.statusBar().showMessage(message)
             self.text_display_panel.set_annotation_prompt(message)
             return
@@ -637,8 +735,7 @@ class MainWindow(QMainWindow):
             self.text_display_panel.set_annotation_prompt(message)
             return
 
-        # Label 0 is currently named "Remove" in DEFAULT_LABEL_MAPPING.
-        # Treat it as cancel / do not save.
+        # `0: Remove` is intentionally not a new annotation label.
         if label_num == 0:
             message = "Label '0: Remove' selected. Annotation was not saved."
             self.statusBar().showMessage(message)
@@ -646,18 +743,18 @@ class MainWindow(QMainWindow):
             return
 
         # ----------------------------------------------------------
-        # Ensure LabelSaver exists.
+        # Read current settings and validate output CSV path.
         # ----------------------------------------------------------
         settings = self.control_panel.get_settings()
         labels_path = settings.get("labels_file_path", "").strip()
 
         if not labels_path:
-            message = "Cannot save: choose a CSV file in 'Save Labels File'."
+            message = "Cannot save: choose a CSV file in Save Labels File."
             self.statusBar().showMessage(message)
             self.text_display_panel.set_annotation_prompt(message)
             return
 
-        # Recreate saver if none exists or the selected CSV path changed.
+        # Create/recreate saver if the selected CSV location has changed.
         if (
             self.data_manager.label_saver is None
             or os.path.abspath(self.data_manager.label_saver.csv_path)
@@ -667,49 +764,53 @@ class MainWindow(QMainWindow):
             self.data_manager.label_saver = LabelSaver(labels_path)
 
         # ----------------------------------------------------------
-        # Build values for the existing LabelSaver API.
+        # Build T-X annotation values.
         # ----------------------------------------------------------
         apex_time_local, apex_dist = self.apex_point
         endpoint_time_local, _ = self.endpoint_point
 
+        apex_time_local = float(apex_time_local)
+        apex_dist = float(apex_dist)
+        endpoint_time_local = float(endpoint_time_local)
+
         duration = abs(endpoint_time_local - apex_time_local)
 
-        # Unix timestamp for apex.
+        # The first timestamp is the Unix timestamp at the start
+        # of the currently loaded data window.
         window_start_unix = float(self.data_manager.loaded_data["time_stamps"][0])
-        apex_unix = window_start_unix + float(apex_time_local)
+        apex_unix = window_start_unix + apex_time_local
 
         apex_time_str = datetime.fromtimestamp(
             apex_unix,
-            tz=timezone.utc
+            tz=timezone.utc,
         ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
         label_mapping = settings.get("label_mapping", DEFAULT_LABEL_MAPPING)
-        label_name = label_mapping.get(label_num, "")
+        label_name = label_mapping.get(int(label_num), "")
 
         dataset_name = os.path.basename(self.data_manager.directory)
         source_file = self.data_manager.filepath
 
-        # LabelSaver currently derives:
+        # LabelSaver.save_tx_label() currently calculates:
         # duration = max(t_s) - min(t_s)
-        # dist_min/max = min/max(x_m)
+        # dist_min / dist_max = min(x_m) / max(x_m)
         #
-        # These small arrays preserve compatibility without changing LabelSaver.
-        t_s = [0.0, float(duration)]
+        # These compact arrays preserve that existing API.
+        t_s = [0.0, duration]
         x_m = [float(self.dist_min), float(self.dist_max)]
 
-        # Each saved annotation gets a fresh UUID.
         annotation_uid = str(uuid.uuid4())
 
         # ----------------------------------------------------------
-        # Save the TX annotation.
+        # Save T-X label first, then obtain its tx_id.
         # ----------------------------------------------------------
         try:
             tx_id = self.data_manager.label_saver.save_tx_label(
                 uid=annotation_uid,
                 apex_time_global=float(apex_unix),
                 apex_time_str=apex_time_str,
-                apex_time_local=float(apex_time_local),
-                apex_dist=float(apex_dist),
+                apex_time_local=apex_time_local,
+                apex_dist=apex_dist,
                 x_m=x_m,
                 t_s=t_s,
                 dataset=dataset_name,
@@ -718,51 +819,87 @@ class MainWindow(QMainWindow):
                 label_name=label_name,
             )
         except Exception as exc:
-            message = f"Failed to save annotation: {exc}"
+            message = f"Failed to save T-X annotation: {exc}"
             print(message)
             self.statusBar().showMessage(message)
             self.text_display_panel.set_annotation_prompt(message)
             return
 
         # ----------------------------------------------------------
-        # Optional: save F-X ranges, if your existing F-X workflow
-        # has supplied annotation_fx_boxes_per_plot.
+        # Save all F-X boxes BEFORE clearing annotation overlays.
+        #
+        # Dictionary layout:
+        # {
+        #   slice_index: [
+        #       (f_min_hz, dist_min_m, f_max_hz, dist_max_m),
+        #       ...
+        #   ],
+        # }
+        #
+        # save_fx_label() updates the TX row so:
+        # f_min = global lowest F-X-box frequency
+        # f_max = global highest F-X-box frequency
         # ----------------------------------------------------------
-        fx_boxes = getattr(
+        rois_by_slice = getattr(
             self.data_manager,
-            "annotation_fx_boxes_per_plot",
-            []
+            "annotation_rois_per_slice",
+            {},
         )
 
-        if fx_boxes:
-            for coords in fx_boxes:
-                if coords is None:
-                    continue
+        fx_dataset = self.data_manager.fx_manager.get_dataset()
+        fx_times = fx_dataset.get("t")
+        win_s = self.data_manager.get_user_settings("win_s") or 2.0
 
-                f_min_hz, x_min_m, f_max_hz, x_max_m = coords
+        fx_box_count = 0
 
-                self.data_manager.label_saver.save_fx_label(
-                    tx_id=tx_id,
-                    uid=annotation_uid,
-                    f_min_hz=float(f_min_hz),
-                    f_max_hz=float(f_max_hz),
-                    x_min_m=float(x_min_m),
-                    x_max_m=float(x_max_m),
-                    dataset=dataset_name,
-                    label=int(label_num),
-                    label_name=label_name,
-                )
+        try:
+            for slice_idx, boxes in rois_by_slice.items():
+                for f_min_hz, dist_min_m, f_max_hz, dist_max_m in boxes:
+                    slice_start_time = 0.0
+
+                    if fx_times is not None and slice_idx < len(fx_times):
+                        slice_start_time = float(fx_times[slice_idx])
+
+                    self.data_manager.label_saver.save_fx_label(
+                        tx_id=tx_id,
+                        uid=annotation_uid,
+                        f_min_hz=float(f_min_hz),
+                        f_max_hz=float(f_max_hz),
+                        x_min_m=float(dist_min_m),
+                        x_max_m=float(dist_max_m),
+                        t=slice_start_time,
+                        win_length_s=float(win_s),
+                        dataset=dataset_name,
+                        label=int(label_num),
+                        label_name=label_name,
+                    )
+
+                    fx_box_count += 1
+
+        except Exception as exc:
+            # TX label has already been saved. Warn instead of deleting it.
+            message = (
+                f"Saved T-X label (ID {tx_id}), but failed to save "
+                f"one or more F-X boxes: {exc}"
+            )
+            print(message)
+            self.statusBar().showMessage(message)
+            self.text_display_panel.set_annotation_prompt(message)
+            return
 
         # ----------------------------------------------------------
-        # Refresh displayed existing labels if enabled.
+        # Update existing-label overlay if it is currently visible.
         # ----------------------------------------------------------
         if self.show_labels:
             labels = self.data_manager.get_labels_in_current_window()
             self.tx_plot_panel.show_existing_labels(labels)
 
+        # ----------------------------------------------------------
+        # Tell the user the annotation was saved.
+        # ----------------------------------------------------------
         message = (
             f"Saved label {label_num}: {label_name} "
-            f"(TX ID {tx_id})."
+            f"(TX ID {tx_id}, F-X boxes: {fx_box_count})."
         )
 
         self.statusBar().showMessage(message)
@@ -772,22 +909,243 @@ class MainWindow(QMainWindow):
             "Press A to begin another annotation."
         )
 
-        # End active annotation mode and remove temporary overlays.
+        # ----------------------------------------------------------
+        # End annotation mode and clear temporary graphics/state.
+        # This must occur only AFTER all F-X boxes have been saved.
+        # ----------------------------------------------------------
         self.cursor_mode = ""
         self.data_manager.set_cursor_mode("")
         self.annotation_stage = ""
         self.tx_plot_panel.annotation_mode_active = False
 
         self.clear_all_annotation_overlays()
-
-        # Clear values so it is obvious that a new annotation must begin.
         self.control_panel.clear_annotation_preview()
 
-        # Reset values held by MainWindow.
+        # Reset MainWindow annotation state.
         self.apex_point = None
         self.apex_row_idx = None
         self.endpoint_point = None
+
         self.distance_point_1 = None
         self.distance_point_2 = None
         self.dist_min = None
         self.dist_max = None
+
+        self.active_fx_slice_indices = []
+        self.f_min = None
+        self.f_max = None
+
+        if hasattr(self.fx_series_panel, "clear_annotation_slice_highlights"):
+            self.fx_series_panel.clear_annotation_slice_highlights()
+
+
+    def get_call_fx_slice_indices(self):
+        """
+        Return F-X slice indices overlapping the whale-call time range.
+
+        Call start:
+            apex time
+
+        Call end:
+            the later time of the two distance-side points
+
+        The endpoint is NOT used for selecting F-X windows.
+        """
+        if self.apex_point is None:
+            return []
+
+        if self.distance_point_1 is None or self.distance_point_2 is None:
+            return []
+
+        apex_time = float(self.apex_point[0])
+
+        # Use whichever distance-boundary point occurs later in time.
+        call_end_time = max(
+            float(self.distance_point_1[0]),
+            float(self.distance_point_2[0]),
+        )
+
+        call_start = min(apex_time, call_end_time)
+        call_end = max(apex_time, call_end_time)
+
+        fx_dataset = self.data_manager.fx_manager.get_dataset()
+        slice_times = fx_dataset.get("t")
+
+        if slice_times is None:
+            return []
+
+        win_s = self.data_manager.get_user_settings("win_s") or 2.0
+        active_indices = []
+
+        for idx, slice_start in enumerate(slice_times):
+            slice_start = float(slice_start)
+            slice_end = slice_start + float(win_s)
+
+            # Include every F-X window overlapping the call interval.
+            if slice_end >= call_start and slice_start <= call_end:
+                active_indices.append(idx)
+
+        return active_indices
+    
+    def start_fx_box_labeling(self):
+        """Enter manual F-X bounding-box labeling mode."""
+
+        if (self.apex_point is None
+            or self.distance_point_1 is None
+            or self.distance_point_2 is None
+        ):
+            message = (
+                "Complete apex labeling and both distance-side points "
+                "before F-X box labeling."
+            )
+            self.statusBar().showMessage(message)
+            self.text_display_panel.set_annotation_prompt(message)
+            return
+
+        self.active_fx_slice_indices = self.get_call_fx_slice_indices()
+
+        if not self.active_fx_slice_indices:
+            message = (
+                "No F-X windows overlap the selected call duration.\n\n"
+                "Check the apex and endpoint selections."
+            )
+            self.statusBar().showMessage("No overlapping F-X windows found.")
+            self.text_display_panel.set_annotation_prompt(message)
+            return
+
+        # Start a fresh set of F-X boxes for this annotation.
+        self.data_manager.annotation_rois_per_slice = {}
+
+        self.f_min = None
+        self.f_max = None
+        self.control_panel.freq_min_display.clear()
+        self.control_panel.freq_max_display.clear()
+
+        self.cursor_mode = "fx_boxes"
+        self.data_manager.set_cursor_mode("fx_boxes")
+        self.annotation_stage = "fx_boxes"
+
+        # Optional visual indication in the thumbnail panel.
+        if hasattr(self.fx_series_panel, "set_annotation_slice_indices"):
+            self.fx_series_panel.set_annotation_slice_indices(
+                self.active_fx_slice_indices
+            )
+
+        first_idx = self.active_fx_slice_indices[0]
+        self.on_fx_slice_selected(first_idx)
+
+        # Scroll the first relevant F-X thumbnail to the top only when
+        # entering F-X box labeling mode.
+        from PyQt6.QtCore import QTimer
+
+        first_thumbnail = self.fx_series_panel.plot_widgets[first_idx]
+
+        QTimer.singleShot(
+            0,
+            lambda: self.fx_series_panel.scroll_area.verticalScrollBar().setValue(
+                max(0, first_thumbnail.pos().y() - 5)
+            )
+        )
+
+        call_start = min(self.apex_point[0], self.endpoint_point[0])
+        call_end = max(self.apex_point[0], self.endpoint_point[0])
+
+        self.text_display_panel.update_cursor_mode("F-X box labeling")
+        self.text_display_panel.set_annotation_prompt(
+            "F-X box labeling mode.\n\n"
+            f"Call time range: {call_start:.2f}–{call_end:.2f} s\n"
+            f"Relevant F-X windows: {len(self.active_fx_slice_indices)}\n\n"
+            "Click a relevant F-X thumbnail on the right.\n"
+            "Double-click: add a box\n"
+            "Ctrl + Click: delete a box\n"
+            "Drag boxes to move or resize them.\n\n"
+            "Press Space to move to the next F-X window.\n\n"
+            "Press F when all F-X boxes are complete."
+        )
+
+        self.statusBar().showMessage(
+            "F-X box mode active. Select relevant windows and draw boxes."
+        )
+
+    def finish_fx_box_labeling(self):
+        """Leave F-X box mode and calculate global frequency minimum/maximum."""
+
+        rois_by_slice = getattr(
+            self.data_manager,
+            "annotation_rois_per_slice",
+            {}
+        )
+
+        all_boxes = [
+            box
+            for boxes in rois_by_slice.values()
+            for box in boxes
+        ]
+
+        if not all_boxes:
+            message = (
+                "No F-X boxes have been added.\n\n"
+                "Select a relevant F-X window and use double-click "
+                "to add a bounding box."
+            )
+            self.statusBar().showMessage("No F-X boxes created.")
+            self.text_display_panel.set_annotation_prompt(message)
+            return
+
+        # ROI tuple format:
+        # (f_min_hz, dist_min_m, f_max_hz, dist_max_m)
+        self.f_min = min(float(box[0]) for box in all_boxes)
+        self.f_max = max(float(box[2]) for box in all_boxes)
+
+        self.control_panel.freq_min_display.setText(f"{self.f_min:.2f}")
+        self.control_panel.freq_max_display.setText(f"{self.f_max:.2f}")
+
+        # Leave F-X editing mode but keep ROIs until Confirm & Save.
+        self.cursor_mode = ""
+        self.data_manager.set_cursor_mode("")
+        self.annotation_stage = "fx_complete"
+        self.tx_plot_panel.annotation_mode_active = False
+
+        if hasattr(self.fx_series_panel, "clear_annotation_slice_highlights"):
+            self.fx_series_panel.clear_annotation_slice_highlights()
+
+        self.text_display_panel.update_cursor_mode("F-X labeling done")
+        self.text_display_panel.set_annotation_prompt(
+            "F-X labeling done.\n\n"
+            f"Frequency minimum: {self.f_min:.2f} Hz\n"
+            f"Frequency maximum: {self.f_max:.2f} Hz\n"
+            f"F-X boxes: {len(all_boxes)}\n\n"
+            "Select a label in the left panel,\n"
+            "then click Confirm & Save."
+        )
+
+        self.statusBar().showMessage(
+            "F-X labeling complete. Select a label and click Confirm & Save."
+        )
+    def on_fx_roi_changed(self, slice_idx):
+        """
+        Refresh the F-X thumbnail color after adding, deleting,
+        moving, or resizing an ROI.
+        """
+        self.fx_series_panel.highlight_slice(slice_idx)
+
+        rois_by_slice = getattr(
+            self.data_manager,
+            "annotation_rois_per_slice",
+            {}
+        )
+
+        box_count = len(rois_by_slice.get(slice_idx, []))
+
+        if self.cursor_mode == "fx_boxes":
+            if box_count > 0:
+                status = (
+                    f"F-X window {slice_idx} labeled "
+                    f"({box_count} box{'es' if box_count != 1 else ''})."
+                )
+            else:
+                status = (
+                    f"F-X window {slice_idx} has no bounding boxes."
+                )
+
+            self.statusBar().showMessage(status)

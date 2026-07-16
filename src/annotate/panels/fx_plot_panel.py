@@ -9,7 +9,9 @@ class FXPlotPanel(QWidget):
     """
     Large single FX plot view.
     """
-    point_clicked = pyqtSignal(int, int)  # row index, col index
+    point_clicked = pyqtSignal(int, int)
+    roi_changed = pyqtSignal(int)  # emits selected F-X slice index
+
 
     def __init__(self, data_manager, vmin=0, vmax=0.4):
         super().__init__()
@@ -133,11 +135,13 @@ class FXPlotPanel(QWidget):
         """Update data_manager storage when an ROI is moved/resized."""
         pos = roi.pos()
         size = roi.size()
-        coords_list = self.data_manager.annotation_rois_per_slice.get(self.current_slice_idx, [])
+        if self.current_slice_idx not in self.data_manager.annotation_rois_per_slice:
+            self.data_manager.annotation_rois_per_slice[self.current_slice_idx] = []
+        coords_list = self.data_manager.annotation_rois_per_slice[self.current_slice_idx]
         for i, r in enumerate(self.fx_slice_rois):
             if r is roi:
-                coords_list[i] = (pos.x(), pos.y(),
-                                  pos.x() + size[0], pos.y() + size[1])
+                coords_list[i] = (pos.x(), pos.y(), pos.x() + size[0], pos.y() + size[1])
+                self.roi_changed.emit(self.current_slice_idx)
                 break
 
     ################################
@@ -158,37 +162,97 @@ class FXPlotPanel(QWidget):
 
 
     def on_mouse_click(self, ev):
+        """
+        F-X box interactions, active only in F-X box mode:
+
+        Double-click  -> add a new ROI bounding box
+        Ctrl-click    -> delete the ROI under the cursor
+        Drag/resize   -> move or resize an existing ROI
+        """
+        if self.data_manager.cursor_mode != "fx_boxes":
+            return
+
         mp = self.plot_widget.getPlotItem().vb.mapSceneToView(ev.scenePos())
         f_click, d_click = mp.x(), mp.y()
 
-        # Ctrl-click = delete
-        if ev.modifiers() == Qt.KeyboardModifier.ControlModifier:
-            idx = self._roi_at_click(f_click, d_click)
-            if idx is not None:
-                roi = self.fx_slice_rois.pop(idx)
-                try:
-                    self.plot_widget.removeItem(roi)
-                except Exception:
-                    pass
-                coords_list = self.data_manager.annotation_rois_per_slice.get(self.current_slice_idx, [])
-                if idx < len(coords_list):
-                    coords_list.pop(idx)
+        modifiers = ev.modifiers()
 
-        # Ctrl+Shift-click = add
-        elif ev.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
-            w = 10.0  # default width in Hz
-            h = 20.0  # default height in m
-            roi_pos = [f_click - w / 2, d_click - h / 2]
-            roi = pg.RectROI(
-                roi_pos, [w, h],
-                pen={'color': 'r', 'width': 2},
-                movable=True, resizable=True
+        # ----------------------------------------------------------
+        # Ctrl + click: delete ROI under mouse cursor.
+        # ----------------------------------------------------------
+        if modifiers == Qt.KeyboardModifier.ControlModifier:
+            idx = self._roi_at_click(f_click, d_click)
+
+            if idx is None:
+                return
+
+            roi = self.fx_slice_rois.pop(idx)
+
+            try:
+                self.plot_widget.removeItem(roi)
+            except Exception:
+                pass
+
+            coords_list = self.data_manager.annotation_rois_per_slice.get(
+                self.current_slice_idx,
+                []
             )
-            roi.sigRegionChanged.connect(lambda r=roi: self._update_roi_coordinates(r))
+
+            if idx < len(coords_list):
+                coords_list.pop(idx)
+
+            # Refresh thumbnail color/state if signal exists.
+            if hasattr(self, "roi_changed"):
+                self.roi_changed.emit(self.current_slice_idx)
+
+            return
+
+        # ----------------------------------------------------------
+        # Double-click: add a new ROI bounding box.
+        # ----------------------------------------------------------
+        if ev.double():
+            w = 10.0   # default width in Hz
+            h = 20.0   # default height in metres
+
+            roi_pos = [
+                f_click - w / 2,
+                d_click - h / 2,
+            ]
+
+            roi = pg.RectROI(
+                roi_pos,
+                [w, h],
+                pen={"color": "r", "width": 2},
+                movable=True,
+                resizable=True,
+            )
+
+            roi.sigRegionChanged.connect(
+                lambda r=roi: self._update_roi_coordinates(r)
+            )
+
             self.plot_widget.getPlotItem().addItem(roi)
             self.fx_slice_rois.append(roi)
-            coords_list = self.data_manager.annotation_rois_per_slice.setdefault(self.current_slice_idx, [])
-            coords_list.append((roi_pos[0], roi_pos[1], roi_pos[0] + w, roi_pos[1] + h))
+
+            coords_list = self.data_manager.annotation_rois_per_slice.setdefault(
+                self.current_slice_idx,
+                []
+            )
+
+            # Stored as:
+            # (f_min, dist_min, f_max, dist_max)
+            coords_list.append((
+                roi_pos[0],
+                roi_pos[1],
+                roi_pos[0] + w,
+                roi_pos[1] + h,
+            ))
+
+            # Refresh thumbnail color/state if signal exists.
+            if hasattr(self, "roi_changed"):
+                self.roi_changed.emit(self.current_slice_idx)
+
+            return
 
     ###############################
     # Other

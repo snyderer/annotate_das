@@ -21,6 +21,10 @@ class FXSeriesPanel(QWidget):
         self.fx_rois = []  # keep track of adjustable ROIs
         self.highlight_idx = None
 
+        # F-X thumbnail indices that overlap the currently annotated call.
+        # Empty unless F-X box annotation mode is active.
+        self.annotation_slice_indices = set()
+
         outer_layout = QVBoxLayout(self)
 
         self.scroll_area = QScrollArea()
@@ -110,10 +114,65 @@ class FXSeriesPanel(QWidget):
             self.plot_img_items.append(img_item)
 
     def highlight_slice(self, idx):
-        if self.highlight_idx is not None:
-            self.plot_widgets[self.highlight_idx].setStyleSheet("")
-        self.plot_widgets[idx].setStyleSheet("border: 3px solid red;")
+        """
+        Highlight the selected F-X thumbnail and scroll it to the top.
+
+        Colors:
+            red   = selected but no bounding box
+            green = selected and has at least one bounding box
+            orange = relevant call window but not selected and unlabeled
+            light green = relevant call window but not selected and labeled
+        """
+        if idx < 0 or idx >= len(self.plot_widgets):
+            return
+
+        rois_by_slice = getattr(
+            self.data_manager,
+            "annotation_rois_per_slice",
+            {}
+        )
+
+        for i, plot_widget in enumerate(self.plot_widgets):
+            has_box = bool(rois_by_slice.get(i, []))
+
+            if i == idx:
+                # Current selected F-X thumbnail.
+                if has_box:
+                    plot_widget.setStyleSheet(
+                        "border: 3px solid #00aa00;"
+                    )
+                else:
+                    plot_widget.setStyleSheet(
+                        "border: 3px solid red;"
+                    )
+
+            elif i in self.annotation_slice_indices:
+                # Relevant to the selected whale call, but not current.
+                if has_box:
+                    plot_widget.setStyleSheet(
+                        "border: 2px solid #7bcf7b;"
+                    )
+                else:
+                    plot_widget.setStyleSheet(
+                        "border: 2px solid orange;"
+                    )
+
+            else:
+                plot_widget.setStyleSheet("")
+
         self.highlight_idx = idx
+
+    def set_annotation_slice_indices(self, indices):
+        """
+        Mark F-X thumbnail plots that overlap the current whale-call window.
+        """
+        self.annotation_slice_indices = set(indices)
+
+        for idx, plot_widget in enumerate(self.plot_widgets):
+            if idx in self.annotation_slice_indices:
+                plot_widget.setStyleSheet("border: 2px solid orange;")
+            else:
+                plot_widget.setStyleSheet("")
 
     def add_adjustable_rois_to_all(self, box_coords, tx_contour_points):
         """
