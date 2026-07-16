@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
             self.data_manager.apply_user_settings(settings)
 
             labels_path = settings.get('labels_file_path')
+            print("labels_path:", labels_path)
             if labels_path:
                 from annotate.data_manager import LabelSaver
                 self.data_manager.label_saver = LabelSaver(labels_path)
@@ -271,9 +272,10 @@ class MainWindow(QMainWindow):
                     # Save TX label and get tx_id (DB PK)
                     tx_id = self.data_manager.label_saver.save_tx_label(
                         uid=self.data_manager.annotation_uid,
-                        apex_time=apex_unix,
+                        apex_time_global=apex_unix,
                         apex_time_str=apex_str,
-                        apex_distance=float(self.tx_apex_point[1]),
+                        apex_time_local=self.tx_apex_point[0],      # ← new
+                        apex_dist=float(self.tx_apex_point[1]),
                         x_m=dist_vec,
                         t_s=rel_t_s,
                         dataset=dataset_name,

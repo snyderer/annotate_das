@@ -1,3 +1,4 @@
+import pandas as pd
 import numpy as np
 import os, sqlite3, json, uuid, getpass, datetime
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -195,23 +196,28 @@ class PreprocessedDataManager(QObject):
             display_time_end = float(self.loaded_data['time_stamps'][-1])+self.h5settings['ns']/self.h5settings['fs']
             dataset = os.path.basename(self.directory)
 
-            sql = """
-                SELECT id, uid, apex_time, apex_distance, x_m, t_s 
-                FROM tx_labels
-                WHERE apex_time >= ? AND apex_time <= ?
-                AND dataset = ?
-            """
-            cur = self.label_saver.conn.execute(sql, (display_time_start, display_time_end, dataset))
-            rows = cur.fetchall()
+            df = self.label_saver.df
+            mask = ((df['apex_time_global'] >= display_time_start) &
+                    (df['apex_time_global'] <= display_time_end) &
+                    (df['dataset'] == dataset))
+            rows = df[mask]
+
             results = []
-            for (tx_id, uid, apex_time, apex_distance, x_m_json, t_s_json) in rows:
+
+
+            for _, row in rows.iterrows():
                 results.append({
-                    "tx_id": tx_id,
-                    "uid": uid,
-                    "apex_time": apex_time,
-                    "apex_distance": apex_distance,
-                    "x_m": json.loads(x_m_json),
-                    "t_s": json.loads(t_s_json)
+                    "tx_id": int(row["tx_id"]),
+                    "uid": row["uid"],
+                    "apex_time_global": row["apex_time_global"],
+                    "apex_time_local": row["apex_time_local"],
+                    "apex_dist": row["apex_dist"],
+                    "duration": row["duration"],
+                    "distance_to_cable": row["distance_to_cable"],
+                    "dist_max": row["dist_max"],
+                    "dist_min": row["dist_min"],
+                    "f_max": row["f_max"],
+                    "f_min": row["f_min"],
                 })
             return results
 
@@ -291,110 +297,112 @@ class SpectrogramHandle:
     
 
 class LabelSaver:
-    def __init__(self, db_path):
-        self.conn = sqlite3.connect(db_path)
-        self.conn.execute("PRAGMA foreign_keys = ON;")  # enforce FK checks
-        self.conn.execute("PRAGMA journal_mode = WAL;")
-        self._create_tables()
+    COLUMNS = [
+        "tx_id", "uid",
+        "apex_time_global", "apex_time_str", "apex_time_local",
+        "apex_dist", "duration", "distance_to_cable",
+        "dist_max", "dist_min", "f_max", "f_min",
+        "label", "label_name", "dataset", "source_file",
+        "saved_timestamp", "username"
+    ]
 
-    def _create_tables(self):
-        # TX table: PK = id, plus human-readable uid
-        self.conn.execute("""
-        CREATE TABLE IF NOT EXISTS tx_labels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid TEXT NOT NULL,             -- human-readable annotation ID
-            apex_time REAL NOT NULL,
-            apex_time_str TEXT NOT NULL,
-            apex_distance REAL NOT NULL,
-            x_m TEXT NOT NULL,
-            t_s TEXT NOT NULL,
-            dataset TEXT NOT NULL,
-            source_file TEXT NOT NULL,
-            label INTEGER NOT NULL,
-            label_name TEXT NOT NULL,
-            saved_timestamp TEXT NOT NULL,
-            username TEXT NOT NULL
-        );
-        """)
+    def __init__(self, csv_path):
+        self.csv_path = csv_path
+        if os.path.exists(csv_path):
+            self.df = pd.read_csv(csv_path)
+        else:
+            self.df = pd.DataFrame(columns=self.COLUMNS)
+            self._save()
+        # self.conn = sqlite3.connect(csv_path)
+        # self.conn.execute("PRAGMA foreign_keys = ON;")  # enforce FK checks
+        # self.conn.execute("PRAGMA journal_mode = WAL;")
+        # self._create_tables()
 
-        # FX table: PK = id, FK = tx_id references tx_labels.id
-        # Also store uid for external/human matching
-        self.conn.execute("""
-        CREATE TABLE IF NOT EXISTS fx_labels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tx_id INTEGER NOT NULL,        -- FK to tx_labels PK
-            uid TEXT NOT NULL,              -- same human-readable uid as TX
-            f_min_hz REAL NOT NULL,
-            f_max_hz REAL NOT NULL,
-            x_min_m REAL NOT NULL,
-            x_max_m REAL NOT NULL,
-            t REAL NOT NULL,
-            win_length_s REAL NOT NULL,
-            dataset TEXT NOT NULL,
-            label INTEGER NOT NULL,
-            label_name TEXT NOT NULL,
-            saved_timestamp TEXT NOT NULL,
-            username TEXT NOT NULL,
-            FOREIGN KEY (tx_id) REFERENCES tx_labels(id) ON DELETE CASCADE
-        );
-        """)
-        self.conn.commit()
+    def _save(self):
+        self.df.to_csv(self.csv_path, index=False)
 
-    def remove_label_by_id(self, tx_id):
-        """Delete a TX label and its associated FX labels by TX primary key ID."""
-        print('Deleting TX label ID:', tx_id)
-        self.conn.execute("DELETE FROM tx_labels WHERE id = ?", (tx_id,))
-        self.conn.commit()
+    def _next_tx_id(self):
+        if self.df.empty:
+            return 1
+        else:
+            return self.df['tx_id'].max() + 1
+        
 
-    def save_tx_label(self, uid, apex_time, apex_time_str, apex_distance,
-                      x_m, t_s, dataset, source_file, label, label_name,
-                      saved_timestamp=None, username=None):
-        """Insert a TX label and return its DB primary key ID (tx_id)."""
+    def save_tx_label(self, uid, apex_time_global, apex_time_str, apex_time_local,
+                       apex_dist, x_m, t_s, dataset, source_file, label, label_name,
+                       distance_to_cable=None, saved_timestamp=None, username=None):
+        """
+        Insert a new whale-call row.
+        x_m / t_s (TX contour points) are used ONLY to derive duration/dist_max/dist_min
+        -- they are not stored raw.
+        Returns tx_id (int) for linking FX min/max updates.
+        """
         
         if saved_timestamp is None:
             saved_timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         if username is None:
             username = getpass.getuser()
+        if distance_to_cable is None:
+            distance_to_cable = np.nan
 
-        cursor = self.conn.execute("""
-            INSERT INTO tx_labels (
-                uid, apex_time, apex_time_str, apex_distance,
-                x_m, t_s, dataset, source_file, label, label_name,
-                saved_timestamp, username
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            uid, apex_time, apex_time_str, apex_distance,
-            json.dumps(x_m), json.dumps(t_s),
-            os.path.basename(dataset),
-            os.path.abspath(source_file),
-            label, label_name,
-            saved_timestamp, username
-        ))
-        self.conn.commit()
+        duration = float(np.max(t_s) - np.min(t_s)) if len(t_s) > 0 else np.nan
+        dist_max = float(np.max(x_m)) if len(x_m) > 0 else np.nan
+        dist_min = float(np.min(x_m)) if len(x_m) > 0 else np.nan
 
-        return cursor.lastrowid  # Return DB PK to use in FX labels
+        tx_id = self._next_tx_id()
+        new_row = {
+            "tx_id": tx_id,
+            "uid": uid,
+            "apex_time_global": apex_time_global,
+            "apex_time_str": apex_time_str,
+            "apex_time_local": apex_time_local,
+            "apex_dist": apex_dist,
+            "duration": duration,
+            "distance_to_cable": distance_to_cable,
+            "dist_max": dist_max,
+            "dist_min": dist_min,
+            "f_max": np.nan,   # filled in via save_fx_label
+            "f_min": np.nan,
+            "dataset": os.path.basename(dataset),
+            "source_file": os.path.abspath(source_file),
+            "label": label,
+            "label_name": label_name,
+            "saved_timestamp": saved_timestamp,
+            "username": username
+        }
 
-    def save_fx_label(self, tx_id, uid, f_min_hz, f_max_hz, x_min_m, x_max_m,
-                      t, win_length_s, dataset, label, label_name,
-                      saved_timestamp=None, username=None):
-        """Insert an FX label linked to its parent TX label via tx_id (DB PK) and also store uid."""
-        print('fmin:', f_min_hz, 'fmax:', f_max_hz, 'xmin:', x_min_m, 'xmax:', x_max_m)
-        if saved_timestamp is None:
-            saved_timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        if username is None:
-            username = getpass.getuser()
+        self.df = pd.concat([self.df, pd.DataFrame([new_row])], ignore_index=True)
+        self._save()
+        return tx_id
 
-        self.conn.execute("""
-            INSERT INTO fx_labels (
-                tx_id, uid, f_min_hz, f_max_hz, x_min_m, x_max_m,
-                t, win_length_s, dataset, label, label_name,
-                saved_timestamp, username
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            tx_id, uid, f_min_hz, f_max_hz, x_min_m, x_max_m,
-            t, win_length_s,
-            os.path.basename(dataset),
-            label, label_name,
-            saved_timestamp, username
-        ))
-        self.conn.commit()
+    def save_fx_label(self, tx_id, f_min_hz, f_max_hz, **kwargs):
+        """
+        Expand the row's f_min/f_max to cover this FX box.
+        Extra kwargs (x_min_m, x_max_m, t, win_length_s, uid, dataset, label, label_name, ...)
+        are accepted but ignored -- kept for call-site compatibility.
+        """
+        idx = self.df.index[self.df["tx_id"] == tx_id]
+        if len(idx) == 0:
+            print(f"Warning: no TX row found for tx_id={tx_id}")
+            return
+        idx = idx[0]
+
+        current_min = self.df.at[idx, "f_min"]
+        current_max = self.df.at[idx, "f_max"]
+
+        new_min = f_min_hz if pd.isna(current_min) else min(current_min, f_min_hz)
+        new_max = f_max_hz if pd.isna(current_max) else max(current_max, f_max_hz)
+
+        self.df.at[idx, "f_min"] = new_min
+        self.df.at[idx, "f_max"] = new_max
+        self._save()
+
+    def remove_label_by_id(self, tx_id):
+        """Delete the row by tx_id."""
+        print("Deleting TX label ID:", tx_id)
+        self.df = self.df[self.df["tx_id"] != tx_id].reset_index(drop=True)
+        self._save()
+
+    def close(self):
+        """No-op, kept for interface compatibility with old SQLite version."""
+        pass

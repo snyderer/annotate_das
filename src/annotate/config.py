@@ -35,8 +35,8 @@ DEFAULT_LABEL_MAPPING = {
     9: "noise"
 }
 
-DEFAULT_DATASET_PATH = r"F:"
-DEFAULT_SAVE_PATH = r"C:\Users\ers334\Documents\databases\DAS_Annotations\A25.db"
+DEFAULT_DATASET_PATH = r"G:\svalbard_full"
+DEFAULT_SAVE_PATH = r"G:\DAS_Annotations\svalbard_full_labels.csv"
 
 # -------------------------------------
 #   Plot color map definition(s)
