@@ -24,6 +24,7 @@ class UserSettings: # control panel settings
 # -------------------------------------
 # Mapping from number keys (1–9) to descriptive label strings
 DEFAULT_LABEL_MAPPING = {
+    0: "Remove",
     1: "Bp_B",
     2: "Bp_A",
     3: "Bp_40Hz",

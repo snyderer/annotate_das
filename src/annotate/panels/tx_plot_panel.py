@@ -8,7 +8,7 @@ from annotate.config import PLOTCOLOR_LUT, UserSettings
 
 
 class TXPlotPanel(QWidget):
-    point_clicked = pyqtSignal(int, int)  # Emits (row index, col index)
+    point_clicked = pyqtSignal(int, int, float)  # row index, time-column index, raw clicked distance in metres
     label_delete_requested = pyqtSignal(int)      # Emits tx_id for DB deletion
 
     def __init__(self, data_manager):
@@ -40,7 +40,12 @@ class TXPlotPanel(QWidget):
         self.annotation_points_list = []    # list of (time, dist)
         self.annotation_points_item = None
         self.annotation_line_item = None
+        
+        # New apex / endpoint / distance markers
         self.apex_point_item = None
+        self.endpoint_point_item = None
+        self.distance_annotation_item = None
+        self.distance_annotation_points = []
 
         # Toggle from MainWindow when annotation stage is active
         self.annotation_mode_active = False
@@ -100,40 +105,31 @@ class TXPlotPanel(QWidget):
         self.existing_label_items = []
         self.existing_labels_metadata = []
 
+        t0 = self.data_manager.loaded_data['time_stamps'][0]
+
         for label in labels:
-            # absolute times for contour = apex_time_abs + relative t_s
-            t_abs = np.array(label['t_s']) + (label['apex_time'] - self.data_manager.loaded_data['time_stamps'][0])
-            x_vec = np.array(label['x_m'])
-            apex_time_rel = label['apex_time'] - self.data_manager.loaded_data['time_stamps'][0]
+            # apex_time_local is already relative to window start -- no contour anymore
+            apex_time_rel = label['apex_time_local']
+            apex_dist = label['apex_dist']
 
-            # Draw contour as a line
-            line_item = pg.PlotDataItem(
-                x=t_abs,
-                y=x_vec,
-                pen=pg.mkPen(color='c', width=2)
-            )
-            self.plot_widget.addItem(line_item)
-            self.existing_label_items.append(line_item)
-
-            # Draw smaller filled apex marker
-            apex_time_rel = label['apex_time'] - self.data_manager.loaded_data['time_stamps'][0]
+            # Single marker for the apex (no more contour line)
             apex_item = pg.ScatterPlotItem(
                 x=[apex_time_rel],
-                y=[label['apex_distance']],
+                y=[apex_dist],
                 symbol='o',
-                size=6,                          # small
-                pen=pg.mkPen('m', width=1),       # magenta outline
-                brush=pg.mkBrush('m')             # magenta fill
+                size=8,
+                pen=pg.mkPen('m', width=1),
+                brush=pg.mkBrush('m')
             )
             self.plot_widget.addItem(apex_item)
             self.existing_label_items.append(apex_item)
 
-            # store metadata for removal lookup
+            # store metadata for click-to-delete lookup
             self.existing_labels_metadata.append({
                 'tx_id': label['tx_id'],
                 'uid': label['uid'],
                 'apex_time_rel': apex_time_rel,
-                'apex_distance': label['apex_distance']
+                'apex_distance': apex_dist
             })
 
     def hide_existing_labels(self):
@@ -284,16 +280,16 @@ class TXPlotPanel(QWidget):
             t_vec = self.data_manager.loaded_data['t']
             row_idx = int(np.argmin(np.abs(x_vec - mp.y())))
             col_idx = int(np.argmin(np.abs(t_vec - mp.x())))
-            self.point_clicked.emit(row_idx, col_idx)
+            self.point_clicked.emit(row_idx, col_idx, float(mp.y())) 
         elif self.data_manager.cursor_mode == 's':
             # Spectrogram select mode active
             if self.data_manager.loaded_data['amp'] is None:
                 return
             x_vec = self.data_manager.loaded_data['x']
             t_vec = self.data_manager.loaded_data['t']
-            row_idx = int(np.argmin(np.abs(x_vec - mp.y())))
+            row_idx = int(np.argmin(np.abs(x_vec - mp.y())))    
             col_idx = int(np.argmin(np.abs(t_vec - mp.x())))
-            self.point_clicked.emit(row_idx, col_idx)
+            self.point_clicked.emit(row_idx, col_idx, float(mp.y()))  
         else:
             # no specific mode active
             if (ev.modifiers() & Qt.KeyboardModifier.ControlModifier
@@ -308,35 +304,124 @@ class TXPlotPanel(QWidget):
             
 
     #####################################################################
-    # Apex
+    # Apex / Endpoint / Distance Annotations
+    #####################################################################
+    #####################################################################
+    # Apex / Endpoint / Distance Annotations
     #####################################################################
     def mark_apex_point(self, time_val, dist_val):
+        """Show one red star representing the currently selected apex."""
         if self.apex_point_item is not None:
             try:
                 self.plot_widget.removeItem(self.apex_point_item)
             except Exception:
                 pass
+
         self.apex_point_item = pg.ScatterPlotItem(
             x=[time_val],
             y=[dist_val],
-            symbol='star',
+            symbol="star",
             size=12,
-            brush='red',
-            pen='red'
+            brush=pg.mkBrush("red"),
+            pen=pg.mkPen("red"),
         )
         self.plot_widget.addItem(self.apex_point_item)
+
+    def clear_apex_point(self):
+        """Remove the current apex marker."""
+        if self.apex_point_item is not None:
+            try:
+                self.plot_widget.removeItem(self.apex_point_item)
+            except Exception:
+                pass
+
+        self.apex_point_item = None
+
+    def mark_endpoint_point(self, time_val, dist_val):
+        """Show one cyan X representing the currently selected endpoint."""
+        self.clear_endpoint_point()
+
+        self.endpoint_point_item = pg.ScatterPlotItem(
+            x=[time_val],
+            y=[dist_val],
+            symbol="x",
+            size=14,
+            pen=pg.mkPen("cyan", width=2),
+            brush=None,
+        )
+        self.plot_widget.addItem(self.endpoint_point_item)
+
+    def clear_endpoint_point(self):
+        """Remove the current endpoint marker."""
+        if self.endpoint_point_item is not None:
+            try:
+                self.plot_widget.removeItem(self.endpoint_point_item)
+            except Exception:
+                pass
+
+        self.endpoint_point_item = None
+
+    def set_distance_annotation_points(self, points):
+        """
+        Replace the currently displayed distance-boundary markers.
+
+        Parameters
+        ----------
+        points : list[tuple[float, float]]
+            A list containing zero, one, or two (time_s, distance_m) points.
+
+        This replaces markers rather than accumulating markers every time
+        the annotator edits the first or second distance point.
+        """
+        # Remove old marker item.
+        if self.distance_annotation_item is not None:
+            try:
+                self.plot_widget.removeItem(self.distance_annotation_item)
+            except Exception:
+                pass
+
+        self.distance_annotation_item = None
+        self.distance_annotation_points = list(points)
+
+        if not points:
+            return
+
+        self.distance_annotation_item = pg.ScatterPlotItem(
+            x=[time_val for time_val, dist_val in points],
+            y=[dist_val for time_val, dist_val in points],
+            symbol="o",
+            size=10,
+            brush=pg.mkBrush("yellow"),
+            pen=pg.mkPen("black", width=1),
+        )
+        self.plot_widget.addItem(self.distance_annotation_item)
+
 
     #####################################################################
     # Clear overlays
     #####################################################################
     def clear_annotation_overlays(self):
-        for item in (self.annotation_points_item, self.annotation_line_item, self.apex_point_item):
+        """Remove temporary apex, endpoint, and distance annotation markers."""
+
+        # Legacy contour items; safe to retain while old code remains.
+        for item in (
+            self.annotation_points_item,
+            self.annotation_line_item,
+        ):
             if item is not None:
                 try:
                     self.plot_widget.removeItem(item)
                 except Exception:
                     pass
+
+        self.annotation_points_item = None
+        self.annotation_line_item = None
         self.annotation_points_list.clear()
+
+        # New annotation markers.
+        self.clear_apex_point()
+        self.clear_endpoint_point()
+        self.set_distance_annotation_points([])
 
     #####################################################################
     # Interpolation
@@ -352,3 +437,4 @@ class TXPlotPanel(QWidget):
         mask = (all_x >= min_x) & (all_x <= max_x)
         interp_t = np.interp(all_x[mask], pts_x, pts_t)
         return list(zip(interp_t, all_x[mask]))
+    
