@@ -1,5 +1,6 @@
 from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QSplitter, QFileDialog, QScrollArea
 from PyQt6 import QtCore
+from PyQt6.QtCore import QTimer
 from datetime import datetime, timezone
 import os, uuid
 
@@ -14,6 +15,26 @@ from annotate.config import DEFAULT_DATASET_PATH, DEFAULT_LABEL_MAPPING
 
 
 class MainWindow(QMainWindow):
+    # ==============================================================
+    # Modes and annotation stages
+    # ==============================================================
+    MODE_NORMAL = ""
+    MODE_SPECTROGRAM = "s"
+    MODE_ANNOTATION = "annotation"
+    MODE_FX_BOXES = "fx_boxes"
+
+    STAGE_NONE = ""
+    STAGE_APEX = "select_apex"
+    STAGE_ENDPOINT = "select_endpoint"
+    STAGE_APEX_DONE = "apex_complete"
+    STAGE_DIST_POINTS = "select_distance_points"
+    STAGE_DIST_DONE = "distance_complete"
+    STAGE_FX = "fx_boxes"
+    STAGE_FX_DONE = "fx_complete"
+
+    # ==============================================================
+    # Construction and layout
+    # ==============================================================
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Annotate DAS Data")
@@ -129,6 +150,9 @@ class MainWindow(QMainWindow):
         # Build menu
         self.create_menu()
 
+    # ==============================================================
+    # Dataset and settings
+    # ==============================================================
     def create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -162,6 +186,77 @@ class MainWindow(QMainWindow):
             from annotate.data_manager import LabelSaver
             self.data_manager.label_saver = LabelSaver(labels_path)
 
+    # ==============================================================
+    # Shared UI and annotation-state helpers
+    # ==============================================================
+    def notify(self, cursor_mode=None, prompt=None, status=None):
+        """Update the text panel and status bar in one place."""
+        if cursor_mode is not None:
+            self.text_display_panel.update_cursor_mode(cursor_mode)
+
+        if prompt is not None:
+            self.text_display_panel.set_annotation_prompt(prompt)
+
+        if status is not None:
+            self.statusBar().showMessage(status)
+
+    def set_mode(self, mode, stage=None, tx_annotation_active=False):
+        """Set application annotation mode consistently."""
+        self.cursor_mode = mode
+        self.data_manager.set_cursor_mode(mode)
+        self.tx_plot_panel.annotation_mode_active = tx_annotation_active
+
+        if stage is not None:
+            self.annotation_stage = stage
+
+    def reset_annotation(self, clear_control_panel=True):
+        """Clear temporary annotation data, overlays, and F-X state."""
+        self.set_mode(self.MODE_NORMAL, self.STAGE_NONE, False)
+
+        self.apex_point = None
+        self.apex_row_idx = None
+        self.endpoint_point = None
+
+        self.distance_point_1 = None
+        self.distance_point_2 = None
+        self.dist_min = None
+        self.dist_max = None
+
+        self.active_fx_slice_indices = []
+        self.f_min = None
+        self.f_max = None
+
+        self.clear_all_annotation_overlays()
+
+        if clear_control_panel:
+            self.control_panel.clear_annotation_preview()
+
+        if hasattr(self.fx_series_panel, "clear_annotation_slice_highlights"):
+            self.fx_series_panel.clear_annotation_slice_highlights()
+
+    def clear_all_annotation_overlays(self):
+        """Remove unsaved T-X markers, F-X ROIs, and thumbnail annotations."""
+        self.tx_plot_panel.clear_annotation_overlays()
+        self.fx_plot_panel.clear_annotation_overlays()
+        self.fx_series_panel.clear_annotation_overlays()
+        if hasattr(self.data_manager, "annotation_rois_per_slice"):
+            self.data_manager.annotation_rois_per_slice.clear()
+
+    def update_distance_markers(self):
+        """Show the latest one or two distance points on the T-X plot."""
+        points = []
+
+        if self.distance_point_1 is not None:
+            points.append(self.distance_point_1)
+
+        if self.distance_point_2 is not None:
+            points.append(self.distance_point_2)
+
+        self.tx_plot_panel.set_distance_annotation_points(points)
+
+    # ==============================================================
+    # Plot and panel interactions
+    # ==============================================================
     def on_fx_slice_selected(self, idx):
         """User clicked an F-X series thumbnail."""
 
@@ -267,432 +362,577 @@ class MainWindow(QMainWindow):
         )
         self.text_display_panel.set_annotation_prompt(message)
 
+    def on_fx_roi_changed(self, slice_idx):
+        """Refresh thumbnail styling after an F-X ROI is added, changed, or removed."""
+        self.fx_series_panel.highlight_slice(slice_idx)
+
+        if self.cursor_mode != self.MODE_FX_BOXES:
+            return
+
+        boxes = getattr(
+            self.data_manager,
+            "annotation_rois_per_slice",
+            {},
+        ).get(slice_idx, [])
+
+        if boxes:
+            count = len(boxes)
+            self.statusBar().showMessage(
+                f"F-X window {slice_idx} labeled ({count} box{'es' if count != 1 else ''})."
+            )
+        else:
+            self.statusBar().showMessage(
+                f"F-X window {slice_idx} has no bounding boxes."
+            )
+
+    def on_point_clicked(self, row_idx, col_idx, clicked_distance=None):
+        if self.cursor_mode == self.MODE_SPECTROGRAM:
+            self.select_spectrogram_row(row_idx)
+            return
+
+        if self.cursor_mode != self.MODE_ANNOTATION:
+            return
+
+        t_val = float(self.data_manager.loaded_data["t"][col_idx])
+        x_val = float(self.data_manager.loaded_data["x"][row_idx])
+
+        if self.annotation_stage == self.STAGE_APEX:
+            self.select_apex(row_idx, t_val, x_val)
+
+        elif self.annotation_stage == self.STAGE_ENDPOINT:
+            self.select_endpoint(t_val, x_val, clicked_distance)
+
+        elif self.annotation_stage == self.STAGE_DIST_POINTS:
+            self.select_distance_point(t_val, x_val)
+
+    def select_spectrogram_row(self, row_idx):
+        dist_val = float(self.data_manager.loaded_data["x"][row_idx])
+
+        self.spectrogram_panel.update_plot(row_idx)
+        self.tx_plot_panel.mark_distance(dist_val)
+        self.fx_plot_panel.mark_distance(dist_val)
+
+        self.set_mode(self.MODE_NORMAL)
+
+        self.notify(
+            cursor_mode="Normal",
+            prompt=f"Spectrogram row selected.\nDistance: {dist_val:.2f} m",
+            status=f"Spectrogram updated for row {row_idx}.",
+        )
+
+    def start_spectrogram_selection(self):
+        self.set_mode(self.MODE_SPECTROGRAM)
+
+        self.notify(
+            cursor_mode="Select spectrogram row",
+            prompt="Click a T-X or F-X plot to select the spectrogram row.",
+            status="Spectrogram selection active.",
+        )
+
+
+    # ==============================================================
+    # Keyboard shortcuts
+    # ==============================================================
     def keyPressEvent(self, event):
-        if event.key() == QtCore.Qt.Key.Key_S:
-            # Spectrogram row selection mode
-            self.cursor_mode = 's'
-            self.data_manager.set_cursor_mode(self.cursor_mode)
-            self.text_display_panel.update_cursor_mode("select spectrogram row")
-            self.statusBar().showMessage("Spectrogram selection: Click a T-X or F-X plot")
-        elif event.key() == QtCore.Qt.Key.Key_A:
-            # ----------------------------------------------------------
-            # Start apex selection
-            # ----------------------------------------------------------
-            if self.cursor_mode != "annotation":
-                self.clear_all_annotation_overlays()
-                self.control_panel.clear_annotation_preview()
+        key = event.key()
 
-                self.apex_point = None
-                self.apex_row_idx = None
-                self.endpoint_point = None
+        if key == QtCore.Qt.Key.Key_S:
+            self.start_spectrogram_selection()
 
-                self.cursor_mode = "annotation"
-                self.data_manager.set_cursor_mode(self.cursor_mode)
+        elif key == QtCore.Qt.Key.Key_A:
+            self.handle_apex_key()
 
-                self.annotation_stage = "select_apex"
-                self.tx_plot_panel.annotation_mode_active = True
+        elif key == QtCore.Qt.Key.Key_D:
+            self.handle_distance_key()
 
-                self.text_display_panel.update_cursor_mode("Apex labeling")
-                self.text_display_panel.set_annotation_prompt(
-                    "Apex labeling:\n"
-                    "Click the apex in the T-X plot.\n\n"
-                    "You may click again to replace it.\n"
-                    "Press A when ready to select the endpoint."
-                )
-                self.statusBar().showMessage(
-                    "Select or adjust the apex. Press A when ready for endpoint selection."
-                )
-
-            # ----------------------------------------------------------
-            # Apex selection -> endpoint selection
-            # ----------------------------------------------------------
-            elif self.annotation_stage == "select_apex":
-                if self.apex_point is None:
-                    self.statusBar().showMessage(
-                        "Select an apex point before switching to endpoint labeling."
-                    )
-                    self.text_display_panel.set_annotation_prompt(
-                        "No apex selected yet.\n"
-                        "Click an apex in the T-X plot first."
-                    )
-                    return
-
-                self.annotation_stage = "select_endpoint"
-
-                self.text_display_panel.update_cursor_mode("Endpoint labeling")
-                self.text_display_panel.set_annotation_prompt(
-                    "Endpoint labeling:\n"
-                    "Click the end of the call on the same channel as the apex.\n\n"
-                    "You may click again to replace it.\n"
-                    "Press A when the endpoint is final."
-                )
-                self.statusBar().showMessage(
-                    "Select or adjust endpoint on the same channel. Press A when done."
-                )
-
-            # ----------------------------------------------------------
-            # Endpoint selection -> apex/endpoint complete
-            # ----------------------------------------------------------
-            elif self.annotation_stage == "select_endpoint":
-                if self.endpoint_point is None:
-                    self.statusBar().showMessage(
-                        "Select an endpoint before completing apex labeling."
-                    )
-                    self.text_display_panel.set_annotation_prompt(
-                        "No endpoint selected yet.\n"
-                        "Click an endpoint on the same channel as the apex."
-                    )
-                    return
-
-                self.annotation_stage = "apex_complete"
-
-                self.text_display_panel.update_cursor_mode("Apex label done")
-                self.text_display_panel.set_annotation_prompt(
-                    "Apex label done.\n\n"
-                    "Press D to label the minimum and maximum distances."
-                )
-                self.statusBar().showMessage(
-                    "Apex label done. Press D to label distance range."
-                )
-
-            # ----------------------------------------------------------
-            # Allow restart/edit after completion
-            # ----------------------------------------------------------
-            elif self.annotation_stage == "apex_complete":
-                self.annotation_stage = "select_apex"
-
-                self.text_display_panel.update_cursor_mode("Apex labeling")
-                self.text_display_panel.set_annotation_prompt(
-                    "Apex editing:\n"
-                    "Click a new apex location.\n\n"
-                    "Press A when ready to select the endpoint."
-                )
-                self.statusBar().showMessage("Editing apex. Click a new apex point.")
-        elif event.key() == QtCore.Qt.Key.Key_D:
-            # Distance labeling requires a completed apex + endpoint selection.
-            if self.apex_point is None or self.endpoint_point is None:
-                message = "Complete apex and endpoint labeling before labeling distances."
-                self.statusBar().showMessage(message)
-                self.text_display_panel.set_annotation_prompt(message)
-                return
-
-            # ----------------------------------------------------------
-            # Start / restart distance point 1 selection
-            # ----------------------------------------------------------
-            if self.annotation_stage in ("apex_complete", "distance_complete", ""):
-                self.distance_point_1 = None
-                self.distance_point_2 = None
-                self.dist_min = None
-                self.dist_max = None
-
-                self.control_panel.dist_min_display.clear()
-                self.control_panel.dist_max_display.clear()
-
-                self.tx_plot_panel.set_distance_annotation_points([])
-
-                self.cursor_mode = "annotation"
-                self.data_manager.set_cursor_mode(self.cursor_mode)
-                self.tx_plot_panel.annotation_mode_active = True
-
-                self.annotation_stage = "select_distance_1"
-
-                self.text_display_panel.update_cursor_mode(
-                    "Distance labeling: first point"
-                )
-                self.text_display_panel.set_annotation_prompt(
-                    "Distance labeling:\n\n"
-                    "Click the first point on the lower side of the call.\n\n"
-                    "Click again to replace it.\n"
-                    "Press D to select the second point."
-                )
-                self.statusBar().showMessage(
-                    "Select the first distance point. Press D for the second point."
-                )
-
-            # ----------------------------------------------------------
-            # Distance point 1 -> distance point 2
-            # ----------------------------------------------------------
-            elif self.annotation_stage == "select_distance_1":
-                if self.distance_point_1 is None:
-                    message = "Select the first distance point before pressing D."
-                    self.statusBar().showMessage(message)
-                    self.text_display_panel.set_annotation_prompt(message)
-                    return
-
-                self.annotation_stage = "select_distance_2"
-
-                self.text_display_panel.update_cursor_mode(
-                    "Distance labeling: second point"
-                )
-                self.text_display_panel.set_annotation_prompt(
-                    "Select the second distance point.\n\n"
-                    "Click the second point on the lower side of the call.\n\n"
-                    "Click again to replace it.\n"
-                    "Press D when distance labeling is done."
-                )
-                self.statusBar().showMessage(
-                    "Select the second distance point. Press D when done."
-                )
-
-            # ----------------------------------------------------------
-            # Distance point 2 -> complete
-            # ----------------------------------------------------------
-            elif self.annotation_stage == "select_distance_2":
-                if self.distance_point_2 is None:
-                    message = "Select the second distance point before pressing D."
-                    self.statusBar().showMessage(message)
-                    self.text_display_panel.set_annotation_prompt(message)
-                    return
-
-                self.annotation_stage = "distance_complete"
-
-                self.text_display_panel.update_cursor_mode("Distance label done")
-                self.text_display_panel.set_annotation_prompt(
-                    "Distance label done.\n\n"
-                    f"Minimum distance: {self.dist_min:.2f} m\n"
-                    f"Maximum distance: {self.dist_max:.2f} m\n\n"
-                    "Select a label in the left panel,\n"
-                    "then click Confirm & Save."
-                )
-                self.statusBar().showMessage(
-                    "Distance label done. Select a label and click Confirm & Save."
-                )
-
-        elif event.key() == QtCore.Qt.Key.Key_F:
-            if self.cursor_mode != "fx_boxes":
-                self.start_fx_box_labeling()
-            else:
+        elif key == QtCore.Qt.Key.Key_F:
+            if self.cursor_mode == self.MODE_FX_BOXES:
                 self.finish_fx_box_labeling()
+            else:
+                self.start_fx_box_labeling()
 
-        elif event.key() == QtCore.Qt.Key.Key_Space:
-            if self.cursor_mode == "fx_boxes":
+        elif key == QtCore.Qt.Key.Key_Space:
+            if self.cursor_mode == self.MODE_FX_BOXES:
                 self.select_next_fx_slice()
             else:
                 super().keyPressEvent(event)
-    
-        elif event.key() == QtCore.Qt.Key.Key_Escape:
-            # Cancel any active mode
-            self.cursor_mode = ''
-            self.data_manager.set_cursor_mode(self.cursor_mode)
-            self.annotation_stage = ''
-            self.tx_plot_panel.annotation_mode_active = False
-            self.text_display_panel.update_cursor_mode("Normal")
-            self.statusBar().showMessage("Normal mode")
-            self.clear_all_annotation_overlays()           
+
+        elif key == QtCore.Qt.Key.Key_Escape:
+            self.reset_annotation(clear_control_panel=False)
+            self.notify(
+                cursor_mode="Normal",
+                prompt="Annotation cancelled.",
+                status="Normal mode",
+            )
+
         else:
             super().keyPressEvent(event)
 
-    def on_point_clicked(self, row_idx, col_idx, clicked_distance=None):
-        if self.cursor_mode == '':
-            return
-        elif self.cursor_mode == 's':
-            dist_val = self.data_manager.loaded_data['x'][row_idx]
-            self.spectrogram_panel.update_plot(row_idx)
-            self.tx_plot_panel.mark_distance(dist_val)
-            self.fx_plot_panel.mark_distance(dist_val)
+    # ==============================================================
+    # T-X apex and endpoint workflow
+    # ==============================================================
+    def handle_apex_key(self):
+        """A key: apex -> endpoint -> apex complete."""
 
-            self.cursor_mode = ''
-            self.text_display_panel.update_cursor_mode("Normal")
-            self.statusBar().showMessage(
-                f"Spectrogram updated for row {row_idx} ({dist_val:.2f} m)"
+        if self.cursor_mode != self.MODE_ANNOTATION:
+            self.reset_annotation()
+            self.set_mode(self.MODE_ANNOTATION, self.STAGE_APEX, True)
+
+            self.notify(
+                cursor_mode="Apex labeling",
+                prompt=(
+                    "Apex labeling:\n"
+                    "Click the apex in the T-X plot.\n\n"
+                    "Click again to replace it.\n"
+                    "Press A for endpoint labeling."
+                ),
+                status="Select the apex.",
             )
-        elif self.cursor_mode == "annotation":
-            t_val = float(self.data_manager.loaded_data["t"][col_idx])
-            x_val = float(self.data_manager.loaded_data["x"][row_idx])
+            return
 
-            # ----------------------------------------------------------
-            # Apex selection: every click replaces the current apex.
-            # ----------------------------------------------------------
-            if self.annotation_stage == "select_apex":
-                self.apex_row_idx = row_idx
-                self.apex_point = (t_val, x_val)
-
-                self.tx_plot_panel.mark_apex_point(t_val, x_val)
-
-                self.control_panel.apex_time_display.setText(f"{t_val:.3f}")
-                self.control_panel.apex_dist_display.setText(f"{x_val:.2f}")
-
-                # An old endpoint is no longer valid if apex changes.
-                self.endpoint_point = None
-                self.control_panel.duration_display.clear()
-                self.tx_plot_panel.clear_endpoint_point()
-
-                self.text_display_panel.set_annotation_prompt(
-                    f"Apex selected:\n"
-                    f"Time: {t_val:.3f} s\n"
-                    f"Distance: {x_val:.2f} m\n\n"
-                    "Click again to replace apex, or press A for endpoint labeling."
+        if self.annotation_stage == self.STAGE_APEX:
+            if self.apex_point is None:
+                self.notify(
+                    prompt="No apex selected yet.\nClick an apex in the T-X plot.",
+                    status="Select an apex first.",
                 )
+                return
 
-                self.statusBar().showMessage(
-                    "Apex updated. Click again to replace, or press A for endpoint."
+            self.annotation_stage = self.STAGE_ENDPOINT
+
+            self.notify(
+                cursor_mode="Endpoint labeling",
+                prompt=(
+                    "Endpoint labeling:\n"
+                    "Click near the call endpoint.\n\n"
+                    "The endpoint will snap to the apex channel.\n"
+                    "Press A when done."
+                ),
+                status="Select the endpoint.",
+            )
+            return
+
+        if self.annotation_stage == self.STAGE_ENDPOINT:
+            if self.endpoint_point is None:
+                self.notify(
+                    prompt="No endpoint selected yet.\nClick near the call endpoint.",
+                    status="Select an endpoint first.",
                 )
+                return
 
-            # ----------------------------------------------------------
-            # Endpoint selection: every valid click replaces endpoint.
-            # ----------------------------------------------------------
-            elif self.annotation_stage == "select_endpoint":
-                if self.apex_point is None or self.apex_row_idx is None:
-                    message = "No apex selected. Press A to return to apex labeling."
-                    self.statusBar().showMessage(message)
-                    self.text_display_panel.set_annotation_prompt(message)
-                    return
+            self.annotation_stage = self.STAGE_APEX_DONE
 
-                # The endpoint must be stored on the same channel as the apex.
-                apex_distance = float(
-                    self.data_manager.loaded_data["x"][self.apex_row_idx]
+            self.notify(
+                cursor_mode="Apex label done",
+                prompt="Apex label done.\n\nPress D to select distance boundaries.",
+                status="Apex labeling complete.",
+            )
+            return
+
+        if self.annotation_stage == self.STAGE_APEX_DONE:
+            self.annotation_stage = self.STAGE_APEX
+
+            self.notify(
+                cursor_mode="Apex editing",
+                prompt="Click a new apex location.\n\nPress A for endpoint labeling.",
+                status="Apex editing active.",
+            )
+
+    def select_apex(self, row_idx, t_val, x_val):
+        self.apex_row_idx = row_idx
+        self.apex_point = (t_val, x_val)
+        self.endpoint_point = None
+
+        self.tx_plot_panel.mark_apex_point(t_val, x_val)
+        self.tx_plot_panel.clear_endpoint_point()
+
+        self.control_panel.apex_time_display.setText(f"{t_val:.3f}")
+        self.control_panel.apex_dist_display.setText(f"{x_val:.2f}")
+        self.control_panel.duration_display.clear()
+
+        self.notify(
+            prompt=(
+                f"Apex selected:\n\n"
+                f"Time: {t_val:.3f} s\n"
+                f"Distance: {x_val:.2f} m\n\n"
+                "Click again to replace it.\n"
+                "Press A for endpoint labeling."
+            ),
+            status="Apex updated.",
+        )
+
+    def select_endpoint(self, t_val, x_val, clicked_distance):
+        if self.apex_point is None or self.apex_row_idx is None:
+            self.notify(
+                prompt="No apex selected.\nPress A to return to apex labeling.",
+                status="No apex selected.",
+            )
+            return
+
+        apex_distance = float(
+            self.data_manager.loaded_data["x"][self.apex_row_idx]
+        )
+
+        if clicked_distance is None:
+            clicked_distance = x_val
+
+        dx = float(self.data_manager.h5settings.get("dx") or 1.0)
+        tolerance = 100.0 * dx
+
+        if abs(float(clicked_distance) - apex_distance) > tolerance:
+            self.notify(
+                prompt=(
+                    "Endpoint click is too far from the apex channel.\n\n"
+                    f"Apex channel: {apex_distance:.2f} m\n"
+                    f"Clicked: {clicked_distance:.2f} m\n\n"
+                    "Click closer to the apex channel."
+                ),
+                status="Endpoint click is too far from apex channel.",
+            )
+            return
+
+        self.endpoint_point = (t_val, apex_distance)
+
+        duration = abs(t_val - float(self.apex_point[0]))
+
+        self.tx_plot_panel.mark_endpoint_point(t_val, apex_distance)
+        self.control_panel.duration_display.setText(f"{duration:.3f}")
+
+        self.notify(
+            prompt=(
+                f"Endpoint selected:\n\n"
+                f"Time: {t_val:.3f} s\n"
+                f"Duration: {duration:.3f} s\n\n"
+                "Click again to replace it.\n"
+                "Press A when done."
+            ),
+            status="Endpoint updated.",
+        )
+
+    # ==============================================================
+    # T-X distance workflow
+    # ==============================================================
+    def handle_distance_key(self):
+        """
+        D key workflow:
+
+        First D:
+            enter distance-point selection mode.
+
+        During selection:
+            clicks retain only the latest two points.
+
+        Second D:
+            finish distance labeling.
+        """
+        if self.apex_point is None or self.endpoint_point is None:
+            self.notify(
+                prompt="Complete apex and endpoint labeling before distance labeling.",
+                status="Apex and endpoint are required first.",
+            )
+            return
+
+        # Start/restart distance labeling.
+        if self.annotation_stage in (
+            self.STAGE_APEX_DONE,
+            self.STAGE_DIST_DONE,
+            self.STAGE_FX_DONE,
+            self.STAGE_NONE,
+        ):
+            self.distance_point_1 = None
+            self.distance_point_2 = None
+            self.dist_min = None
+            self.dist_max = None
+
+            self.control_panel.dist_min_display.clear()
+            self.control_panel.dist_max_display.clear()
+
+            self.set_mode(
+                self.MODE_ANNOTATION,
+                self.STAGE_DIST_POINTS,
+                tx_annotation_active=True,
+            )
+
+            self.notify(
+                cursor_mode="Distance labeling",
+                prompt=(
+                    "Distance labeling:\n\n"
+                    "Click two points on the lower side of the call.\n\n"
+                    "If you click more than two points, only the latest two "
+                    "points are retained.\n\n"
+                    "Press D when the distance range is correct."
+                ),
+                status="Select two distance points.",
+            )
+            return
+
+        # Finish distance labeling.
+        if self.annotation_stage == self.STAGE_DIST_POINTS:
+            if self.distance_point_1 is None or self.distance_point_2 is None:
+                self.notify(
+                    prompt=(
+                        "Select two distance points before finishing.\n\n"
+                        "The latest two selected points define distance min/max."
+                    ),
+                    status="Two distance points are required.",
                 )
+                return
 
-                # Channel spacing from settings.h5. Fallback is used if unavailable.
-                dx = float(self.data_manager.h5settings.get("dx") or 1.0)
+            self.annotation_stage = self.STAGE_DIST_DONE
 
-                # Allow clicks within two channels of the apex channel.
-                # Increase/decrease 2.0 if desired.
-                snap_tolerance_m = 100.0 * dx
-
-                # `clicked_distance` is raw cursor location, before nearest-row snapping.
-                # If click came from FXPlotPanel, fall back to the nearest TX row value.
-                if clicked_distance is None:
-                    clicked_distance = x_val
-
-                distance_from_apex_channel = abs(clicked_distance - apex_distance)
-
-                # Reject only clicks that are genuinely far away from the apex channel.
-                if distance_from_apex_channel > snap_tolerance_m:
-                    message = (
-                        "Endpoint click is too far from the apex channel.\n\n"
-                        f"Apex channel: {apex_distance:.2f} m\n"
-                        f"Clicked: {clicked_distance:.2f} m\n"
-                        f"Allowed distance: ±{snap_tolerance_m:.2f} m\n\n"
-                        "Click closer to the apex channel."
-                    )
-                    self.statusBar().showMessage(
-                        "Endpoint click is too far from the apex channel."
-                    )
-                    self.text_display_panel.set_annotation_prompt(message)
-                    return
-
-                # Snap endpoint to apex channel.
-                # Keep time from the user click, but use the apex row/distance.
-                row_idx = self.apex_row_idx
-                x_val = apex_distance
-
-                self.endpoint_point = (t_val, x_val)
-                duration = abs(t_val - self.apex_point[0])
-
-                self.tx_plot_panel.mark_endpoint_point(t_val, x_val)
-                self.control_panel.duration_display.setText(f"{duration:.3f}")
-
-                self.text_display_panel.set_annotation_prompt(
-                    "Endpoint selected and snapped to apex channel.\n\n"
-                    f"Endpoint time: {t_val:.3f} s\n"
-                    f"Channel: {x_val:.2f} m\n"
-                    f"Duration: {duration:.3f} s\n\n"
-                    "Click again to replace endpoint, or press A when done."
-                )
-
-                self.statusBar().showMessage(
-                    f"Endpoint selected at {t_val:.3f} s and snapped to apex channel."
-                )
-            # ----------------------------------------------------------
-            # Distance point 1 selection.
-            # ----------------------------------------------------------
-            elif self.annotation_stage == "select_distance_1":
-                self.distance_point_1 = (t_val, x_val)
-
-                # Point 2 remains invalid if point 1 changes.
-                self.distance_point_2 = None
-                self.dist_min = None
-                self.dist_max = None
-
-                self.control_panel.dist_min_display.clear()
-                self.control_panel.dist_max_display.clear()
-                self._update_distance_markers()
-
-                self.text_display_panel.set_annotation_prompt(
-                    "First distance point selected.\n\n"
-                    f"Distance: {x_val:.2f} m\n\n"
-                    "Click again to replace this point.\n"
-                    "Press D to select the second distance point."
-                )
-                self.statusBar().showMessage(
-                    "First distance point updated. Press D to select the second point."
-                )
-
-            # ----------------------------------------------------------
-            # Distance point 2 selection.
-            # ----------------------------------------------------------
-            elif self.annotation_stage == "select_distance_2":
-                if self.distance_point_1 is None:
-                    message = "First distance point is missing. Press D to restart."
-                    self.statusBar().showMessage(message)
-                    self.text_display_panel.set_annotation_prompt(message)
-                    return
-
-                self.distance_point_2 = (t_val, x_val)
-
-                d1 = float(self.distance_point_1[1])
-                d2 = float(self.distance_point_2[1])
-
-                self.dist_min = min(d1, d2)
-                self.dist_max = max(d1, d2)
-
-                self.control_panel.dist_min_display.setText(f"{self.dist_min:.2f}")
-                self.control_panel.dist_max_display.setText(f"{self.dist_max:.2f}")
-                self._update_distance_markers()
-
-                self.text_display_panel.set_annotation_prompt(
-                    "Second distance point selected.\n\n"
+            self.notify(
+                cursor_mode="Distance label done",
+                prompt=(
+                    "Distance label done.\n\n"
                     f"Minimum distance: {self.dist_min:.2f} m\n"
                     f"Maximum distance: {self.dist_max:.2f} m\n\n"
-                    "Click again to replace this point.\n"
-                    "Press D when distance labeling is done."
-                )
-                self.statusBar().showMessage(
-                    "Second distance point updated. Press D when distance labeling is done."
-                )
+                    "Press F for F-X box labeling,\n"
+                    "or select a label and click Confirm & Save."
+                ),
+                status="Distance labeling complete.",
+            )
 
-    def _update_distance_markers(self):
-        """Show the current distance point 1 and point 2 on the T-X plot."""
-        points = []
+    def select_distance_point(self, t_val, x_val):
+        """
+        Keep only the newest two distance points.
 
-        if self.distance_point_1 is not None:
-            points.append(self.distance_point_1)
+        Click 1: point_1
+        Click 2: point_1 + point_2
+        Click 3+: discard oldest point, retain newest two.
+        """
+        new_point = (t_val, x_val)
 
-        if self.distance_point_2 is not None:
-            points.append(self.distance_point_2)
+        if self.distance_point_1 is None:
+            self.distance_point_1 = new_point
 
-        self.tx_plot_panel.set_distance_annotation_points(points)
+            # Show the first yellow marker immediately.
+            self.update_distance_markers()
 
-    def on_toggle_labels(self, show):
-        """Show or hide existing TX labels in current time window."""
-        if show:
-            labels = self.data_manager.get_labels_in_current_window()
-            self.tx_plot_panel.show_existing_labels(labels)
-            self.statusBar().showMessage(f"Showing {len(labels)} existing labels in window")
-            self.control_panel.toggle_labels_button.setText("Hide Existing Labels")
-            self.show_labels = True
+            self.notify(
+                prompt=(
+                    "First distance point selected.\n\n"
+                    f"Distance: {x_val:.2f} m\n\n"
+                    "Click a second point to calculate min/max.\n"
+                    "Press D when both points are correct."
+                ),
+                status="First distance point selected.",
+            )
+            return
+
+        if self.distance_point_2 is None:
+            self.distance_point_2 = new_point
         else:
-            self.tx_plot_panel.hide_existing_labels()
-            self.statusBar().showMessage("Existing labels hidden")
-            self.control_panel.toggle_labels_button.setText("Show Existing Labels")
-            self.show_labels = False
-    
-    def on_delete_label(self, tx_id):
-        """Remove label from DB and refresh overlays."""
-        if self.data_manager.label_saver:
-            self.data_manager.label_saver.remove_label_by_id(tx_id)
-            refreshed = self.data_manager.get_labels_in_current_window()
-            self.tx_plot_panel.show_existing_labels(refreshed)
-            self.statusBar().showMessage(f"Removed label {tx_id}")
-    
-    def clear_all_annotation_overlays(self):
-        self.tx_plot_panel.clear_annotation_overlays()
-        self.fx_plot_panel.clear_annotation_overlays()
-        self.fx_series_panel.clear_annotation_overlays()
-        if hasattr(self.data_manager, "annotation_rois_per_slice"):
-            self.data_manager.annotation_rois_per_slice.clear()
+            # Keep only the latest two clicked points.
+            self.distance_point_1 = self.distance_point_2
+            self.distance_point_2 = new_point
 
+        d1 = float(self.distance_point_1[1])
+        d2 = float(self.distance_point_2[1])
+
+        self.dist_min = min(d1, d2)
+        self.dist_max = max(d1, d2)
+
+        self.control_panel.dist_min_display.setText(f"{self.dist_min:.2f}")
+        self.control_panel.dist_max_display.setText(f"{self.dist_max:.2f}")
+
+        # Redraw yellow markers using the latest two points.
+        self.update_distance_markers()
+
+        self.notify(
+            prompt=(
+                "Distance points selected.\n\n"
+                f"Point 1: {self.distance_point_1[1]:.2f} m\n"
+                f"Point 2: {self.distance_point_2[1]:.2f} m\n"
+                f"Minimum distance: {self.dist_min:.2f} m\n"
+                f"Maximum distance: {self.dist_max:.2f} m\n\n"
+                "Click again to replace the oldest point.\n"
+                "Press D when distance labeling is done."
+            ),
+            status="Distance range updated.",
+        )
+    # ==============================================================
+    # F-X bounding-box workflow
+    # ==============================================================
+    def get_fx_call_time_range(self):
+        """
+        F-X windows use:
+        start = apex time
+        end = later time of the two distance points
+        """
+        if (
+            self.apex_point is None
+            or self.distance_point_1 is None
+            or self.distance_point_2 is None
+        ):
+            return None, None
+
+        apex_time = float(self.apex_point[0])
+
+        distance_end_time = max(
+            float(self.distance_point_1[0]),
+            float(self.distance_point_2[0]),
+        )
+
+        return min(apex_time, distance_end_time), max(apex_time, distance_end_time)
+
+    def get_call_fx_slice_indices(self):
+        """Return F-X windows that overlap the selected whale-call interval."""
+        call_start, call_end = self.get_fx_call_time_range()
+
+        if call_start is None or call_end is None:
+            return []
+
+        dataset = self.data_manager.fx_manager.get_dataset()
+        slice_times = dataset.get("t")
+
+        if slice_times is None:
+            return []
+
+        win_s = float(self.data_manager.get_user_settings("win_s") or 2.0)
+
+        return [
+            idx
+            for idx, slice_start in enumerate(slice_times)
+            if float(slice_start) <= call_end
+            and float(slice_start) + win_s >= call_start
+        ]
+    
+    def start_fx_box_labeling(self):
+        """Enter manual F-X bounding-box labeling mode."""
+
+        if (self.apex_point is None
+            or self.distance_point_1 is None
+            or self.distance_point_2 is None
+        ):
+            message = (
+                "Complete apex labeling and both distance-side points "
+                "before F-X box labeling."
+            )
+            self.statusBar().showMessage(message)
+            self.text_display_panel.set_annotation_prompt(message)
+            return
+
+        self.active_fx_slice_indices = self.get_call_fx_slice_indices()
+
+        if not self.active_fx_slice_indices:
+            message = (
+                "No F-X windows overlap the selected call duration.\n\n"
+                "Check the apex and distance point selections."
+            )
+            self.statusBar().showMessage("No overlapping F-X windows found.")
+            self.text_display_panel.set_annotation_prompt(message)
+            return
+
+        # Start a fresh set of F-X boxes for this annotation.
+        self.data_manager.annotation_rois_per_slice = {}
+
+        self.f_min = None
+        self.f_max = None
+        self.control_panel.freq_min_display.clear()
+        self.control_panel.freq_max_display.clear()
+        self.set_mode(
+            self.MODE_FX_BOXES,
+            self.STAGE_FX,
+            tx_annotation_active=False,
+        )
+
+        # Optional visual indication in the thumbnail panel.
+        if hasattr(self.fx_series_panel, "set_annotation_slice_indices"):
+            self.fx_series_panel.set_annotation_slice_indices(
+                self.active_fx_slice_indices
+            )
+
+        first_idx = self.active_fx_slice_indices[0]
+        self.on_fx_slice_selected(first_idx)
+
+        # Scroll the first relevant F-X thumbnail to the top only when
+        # entering F-X box labeling mode.
+
+        first_thumbnail = self.fx_series_panel.plot_widgets[first_idx]
+
+        QTimer.singleShot(
+            0,
+            lambda: self.fx_series_panel.scroll_area.verticalScrollBar().setValue(
+                max(0, first_thumbnail.pos().y() - 5)
+            )
+        )
+
+        call_start, call_end = self.get_fx_call_time_range()  
+        self.notify(
+            cursor_mode="F-X box labeling",
+            prompt=(
+                "F-X box labeling mode.\n\n"
+                f"Call time range: {call_start:.2f}–{call_end:.2f} s\n"
+                f"Relevant F-X windows: {len(self.active_fx_slice_indices)}\n\n"
+                "Click a relevant F-X thumbnail on the right.\n"
+                "Double-click: add a box\n"
+                "Ctrl + Click: delete a box\n"
+                "Drag boxes to move or resize them.\n\n"
+                "Press Space to move to the next F-X window.\n\n"
+                "Press F when all F-X boxes are complete."
+            ),
+            status="F-X box mode active. Select relevant windows and draw boxes.",
+        )      
+
+    def finish_fx_box_labeling(self):
+        """Leave F-X box mode and calculate global frequency minimum/maximum."""
+
+        rois_by_slice = getattr(
+            self.data_manager,
+            "annotation_rois_per_slice",
+            {}
+        )
+
+        all_boxes = [
+            box
+            for boxes in rois_by_slice.values()
+            for box in boxes
+        ]
+
+        if not all_boxes:
+            message = (
+                "No F-X boxes have been added.\n\n"
+                "Select a relevant F-X window and use double-click "
+                "to add a bounding box."
+            )
+            self.statusBar().showMessage("No F-X boxes created.")
+            self.text_display_panel.set_annotation_prompt(message)
+            return
+
+        # ROI tuple format:
+        # (f_min_hz, dist_min_m, f_max_hz, dist_max_m)
+        self.f_min = min(float(box[0]) for box in all_boxes)
+        self.f_max = max(float(box[2]) for box in all_boxes)
+
+        self.control_panel.freq_min_display.setText(f"{self.f_min:.2f}")
+        self.control_panel.freq_max_display.setText(f"{self.f_max:.2f}")
+
+        # Leave F-X editing mode but keep ROIs until Confirm & Save.
+        self.set_mode(
+            self.MODE_NORMAL,
+            self.STAGE_FX_DONE,
+            tx_annotation_active=False,
+        )
+
+        if hasattr(self.fx_series_panel, "clear_annotation_slice_highlights"):
+            self.fx_series_panel.clear_annotation_slice_highlights()
+
+        self.notify(
+            cursor_mode="F-X labeling done",
+            prompt=(
+                "F-X labeling done.\n\n"
+                f"Frequency minimum: {self.f_min:.2f} Hz\n"
+                f"Frequency maximum: {self.f_max:.2f} Hz\n"
+                f"F-X boxes: {len(all_boxes)}\n\n"
+                "Select a label in the left panel,\n"
+                "then click Confirm & Save."
+            ),
+            status="F-X labeling complete. Select a label and click Confirm & Save.",
+        )
+
+    # ==============================================================
+    # Saving, displaying, and deleting labels
+    # ==============================================================
     def save_annotation(self, label_num):
         """
         Save the current T-X annotation and all manually drawn F-X ROI boxes.
@@ -913,239 +1153,32 @@ class MainWindow(QMainWindow):
         # End annotation mode and clear temporary graphics/state.
         # This must occur only AFTER all F-X boxes have been saved.
         # ----------------------------------------------------------
-        self.cursor_mode = ""
-        self.data_manager.set_cursor_mode("")
-        self.annotation_stage = ""
-        self.tx_plot_panel.annotation_mode_active = False
+        self.reset_annotation(clear_control_panel=True)
 
-        self.clear_all_annotation_overlays()
-        self.control_panel.clear_annotation_preview()
-
-        # Reset MainWindow annotation state.
-        self.apex_point = None
-        self.apex_row_idx = None
-        self.endpoint_point = None
-
-        self.distance_point_1 = None
-        self.distance_point_2 = None
-        self.dist_min = None
-        self.dist_max = None
-
-        self.active_fx_slice_indices = []
-        self.f_min = None
-        self.f_max = None
-
-        if hasattr(self.fx_series_panel, "clear_annotation_slice_highlights"):
-            self.fx_series_panel.clear_annotation_slice_highlights()
-
-
-    def get_call_fx_slice_indices(self):
-        """
-        Return F-X slice indices overlapping the whale-call time range.
-
-        Call start:
-            apex time
-
-        Call end:
-            the later time of the two distance-side points
-
-        The endpoint is NOT used for selecting F-X windows.
-        """
-        if self.apex_point is None:
-            return []
-
-        if self.distance_point_1 is None or self.distance_point_2 is None:
-            return []
-
-        apex_time = float(self.apex_point[0])
-
-        # Use whichever distance-boundary point occurs later in time.
-        call_end_time = max(
-            float(self.distance_point_1[0]),
-            float(self.distance_point_2[0]),
-        )
-
-        call_start = min(apex_time, call_end_time)
-        call_end = max(apex_time, call_end_time)
-
-        fx_dataset = self.data_manager.fx_manager.get_dataset()
-        slice_times = fx_dataset.get("t")
-
-        if slice_times is None:
-            return []
-
-        win_s = self.data_manager.get_user_settings("win_s") or 2.0
-        active_indices = []
-
-        for idx, slice_start in enumerate(slice_times):
-            slice_start = float(slice_start)
-            slice_end = slice_start + float(win_s)
-
-            # Include every F-X window overlapping the call interval.
-            if slice_end >= call_start and slice_start <= call_end:
-                active_indices.append(idx)
-
-        return active_indices
+    def on_toggle_labels(self, show):
+        """Show or hide existing TX labels in current time window."""
+        if show:
+            labels = self.data_manager.get_labels_in_current_window()
+            self.tx_plot_panel.show_existing_labels(labels)
+            self.statusBar().showMessage(f"Showing {len(labels)} existing labels in window")
+            self.control_panel.toggle_labels_button.setText("Hide Existing Labels")
+            self.show_labels = True
+        else:
+            self.tx_plot_panel.hide_existing_labels()
+            self.statusBar().showMessage("Existing labels hidden")
+            self.control_panel.toggle_labels_button.setText("Show Existing Labels")
+            self.show_labels = False
     
-    def start_fx_box_labeling(self):
-        """Enter manual F-X bounding-box labeling mode."""
+    def on_delete_label(self, tx_id):
+        """Remove label from DB and refresh overlays."""
+        if self.data_manager.label_saver:
+            self.data_manager.label_saver.remove_label_by_id(tx_id)
+            refreshed = self.data_manager.get_labels_in_current_window()
+            self.tx_plot_panel.show_existing_labels(refreshed)
+            self.statusBar().showMessage(f"Removed label {tx_id}")
+    
 
-        if (self.apex_point is None
-            or self.distance_point_1 is None
-            or self.distance_point_2 is None
-        ):
-            message = (
-                "Complete apex labeling and both distance-side points "
-                "before F-X box labeling."
-            )
-            self.statusBar().showMessage(message)
-            self.text_display_panel.set_annotation_prompt(message)
-            return
 
-        self.active_fx_slice_indices = self.get_call_fx_slice_indices()
 
-        if not self.active_fx_slice_indices:
-            message = (
-                "No F-X windows overlap the selected call duration.\n\n"
-                "Check the apex and endpoint selections."
-            )
-            self.statusBar().showMessage("No overlapping F-X windows found.")
-            self.text_display_panel.set_annotation_prompt(message)
-            return
 
-        # Start a fresh set of F-X boxes for this annotation.
-        self.data_manager.annotation_rois_per_slice = {}
 
-        self.f_min = None
-        self.f_max = None
-        self.control_panel.freq_min_display.clear()
-        self.control_panel.freq_max_display.clear()
-
-        self.cursor_mode = "fx_boxes"
-        self.data_manager.set_cursor_mode("fx_boxes")
-        self.annotation_stage = "fx_boxes"
-
-        # Optional visual indication in the thumbnail panel.
-        if hasattr(self.fx_series_panel, "set_annotation_slice_indices"):
-            self.fx_series_panel.set_annotation_slice_indices(
-                self.active_fx_slice_indices
-            )
-
-        first_idx = self.active_fx_slice_indices[0]
-        self.on_fx_slice_selected(first_idx)
-
-        # Scroll the first relevant F-X thumbnail to the top only when
-        # entering F-X box labeling mode.
-        from PyQt6.QtCore import QTimer
-
-        first_thumbnail = self.fx_series_panel.plot_widgets[first_idx]
-
-        QTimer.singleShot(
-            0,
-            lambda: self.fx_series_panel.scroll_area.verticalScrollBar().setValue(
-                max(0, first_thumbnail.pos().y() - 5)
-            )
-        )
-
-        call_start = min(self.apex_point[0], self.endpoint_point[0])
-        call_end = max(self.apex_point[0], self.endpoint_point[0])
-
-        self.text_display_panel.update_cursor_mode("F-X box labeling")
-        self.text_display_panel.set_annotation_prompt(
-            "F-X box labeling mode.\n\n"
-            f"Call time range: {call_start:.2f}–{call_end:.2f} s\n"
-            f"Relevant F-X windows: {len(self.active_fx_slice_indices)}\n\n"
-            "Click a relevant F-X thumbnail on the right.\n"
-            "Double-click: add a box\n"
-            "Ctrl + Click: delete a box\n"
-            "Drag boxes to move or resize them.\n\n"
-            "Press Space to move to the next F-X window.\n\n"
-            "Press F when all F-X boxes are complete."
-        )
-
-        self.statusBar().showMessage(
-            "F-X box mode active. Select relevant windows and draw boxes."
-        )
-
-    def finish_fx_box_labeling(self):
-        """Leave F-X box mode and calculate global frequency minimum/maximum."""
-
-        rois_by_slice = getattr(
-            self.data_manager,
-            "annotation_rois_per_slice",
-            {}
-        )
-
-        all_boxes = [
-            box
-            for boxes in rois_by_slice.values()
-            for box in boxes
-        ]
-
-        if not all_boxes:
-            message = (
-                "No F-X boxes have been added.\n\n"
-                "Select a relevant F-X window and use double-click "
-                "to add a bounding box."
-            )
-            self.statusBar().showMessage("No F-X boxes created.")
-            self.text_display_panel.set_annotation_prompt(message)
-            return
-
-        # ROI tuple format:
-        # (f_min_hz, dist_min_m, f_max_hz, dist_max_m)
-        self.f_min = min(float(box[0]) for box in all_boxes)
-        self.f_max = max(float(box[2]) for box in all_boxes)
-
-        self.control_panel.freq_min_display.setText(f"{self.f_min:.2f}")
-        self.control_panel.freq_max_display.setText(f"{self.f_max:.2f}")
-
-        # Leave F-X editing mode but keep ROIs until Confirm & Save.
-        self.cursor_mode = ""
-        self.data_manager.set_cursor_mode("")
-        self.annotation_stage = "fx_complete"
-        self.tx_plot_panel.annotation_mode_active = False
-
-        if hasattr(self.fx_series_panel, "clear_annotation_slice_highlights"):
-            self.fx_series_panel.clear_annotation_slice_highlights()
-
-        self.text_display_panel.update_cursor_mode("F-X labeling done")
-        self.text_display_panel.set_annotation_prompt(
-            "F-X labeling done.\n\n"
-            f"Frequency minimum: {self.f_min:.2f} Hz\n"
-            f"Frequency maximum: {self.f_max:.2f} Hz\n"
-            f"F-X boxes: {len(all_boxes)}\n\n"
-            "Select a label in the left panel,\n"
-            "then click Confirm & Save."
-        )
-
-        self.statusBar().showMessage(
-            "F-X labeling complete. Select a label and click Confirm & Save."
-        )
-    def on_fx_roi_changed(self, slice_idx):
-        """
-        Refresh the F-X thumbnail color after adding, deleting,
-        moving, or resizing an ROI.
-        """
-        self.fx_series_panel.highlight_slice(slice_idx)
-
-        rois_by_slice = getattr(
-            self.data_manager,
-            "annotation_rois_per_slice",
-            {}
-        )
-
-        box_count = len(rois_by_slice.get(slice_idx, []))
-
-        if self.cursor_mode == "fx_boxes":
-            if box_count > 0:
-                status = (
-                    f"F-X window {slice_idx} labeled "
-                    f"({box_count} box{'es' if box_count != 1 else ''})."
-                )
-            else:
-                status = (
-                    f"F-X window {slice_idx} has no bounding boxes."
-                )
-
-            self.statusBar().showMessage(status)

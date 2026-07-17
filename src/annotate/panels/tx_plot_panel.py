@@ -302,10 +302,6 @@ class TXPlotPanel(QWidget):
                     self.label_delete_requested.emit(meta['tx_id'])  # send deletion request
                     return
             
-
-    #####################################################################
-    # Apex / Endpoint / Distance Annotations
-    #####################################################################
     #####################################################################
     # Apex / Endpoint / Distance Annotations
     #####################################################################
@@ -363,17 +359,14 @@ class TXPlotPanel(QWidget):
 
     def set_distance_annotation_points(self, points):
         """
-        Replace the currently displayed distance-boundary markers.
+        Replace visible yellow distance markers with the supplied points.
 
-        Parameters
-        ----------
-        points : list[tuple[float, float]]
-            A list containing zero, one, or two (time_s, distance_m) points.
-
-        This replaces markers rather than accumulating markers every time
-        the annotator edits the first or second distance point.
+        points is a list of:
+            [(time_s, distance_m), ...]
         """
-        # Remove old marker item.
+        if not hasattr(self, "distance_annotation_item"):
+            self.distance_annotation_item = None
+
         if self.distance_annotation_item is not None:
             try:
                 self.plot_widget.removeItem(self.distance_annotation_item)
@@ -381,21 +374,20 @@ class TXPlotPanel(QWidget):
                 pass
 
         self.distance_annotation_item = None
-        self.distance_annotation_points = list(points)
 
         if not points:
             return
 
         self.distance_annotation_item = pg.ScatterPlotItem(
-            x=[time_val for time_val, dist_val in points],
-            y=[dist_val for time_val, dist_val in points],
+            x=[time_s for time_s, _ in points],
+            y=[distance_m for _, distance_m in points],
             symbol="o",
             size=10,
             brush=pg.mkBrush("yellow"),
             pen=pg.mkPen("black", width=1),
         )
-        self.plot_widget.addItem(self.distance_annotation_item)
 
+        self.plot_widget.addItem(self.distance_annotation_item)
 
     #####################################################################
     # Clear overlays
