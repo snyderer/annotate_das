@@ -26,10 +26,17 @@ class MainWindow(QMainWindow):
 
     STAGE_NONE = ""
     STAGE_APEX = "select_apex"
+    STAGE_APEX_DONE = "apex_confirmed"
+
+    STAGE_HYPERBOLA = "hyperbola_fitting"
+    STAGE_HYPERBOLA_DONE = "hyperbola_confirmed"
+
     STAGE_ENDPOINT = "select_endpoint"
-    STAGE_APEX_DONE = "apex_complete"
+    STAGE_ENDPOINT_DONE = "endpoint_confirmed"
+
     STAGE_DIST_POINTS = "select_distance_points"
     STAGE_DIST_DONE = "distance_complete"
+
     STAGE_FX = "fx_boxes"
     STAGE_FX_DONE = "fx_complete"
 
@@ -124,6 +131,7 @@ class MainWindow(QMainWindow):
         self.tx_plot_panel.label_delete_requested.connect(self.on_delete_label)
         self.fx_plot_panel.roi_changed.connect(self.on_fx_roi_changed)
         self.tx_plot_panel.apex_dragged.connect(self.on_apex_dragged)
+        self.tx_plot_panel.endpoint_dragged.connect(self.on_endpoint_dragged)
 
         # === Navigation buttons ===
         self.control_panel.btn_back.clicked.connect(lambda: self.data_manager.navigate('backward'))
@@ -424,7 +432,7 @@ class MainWindow(QMainWindow):
             self.select_apex(row_idx, t_val, x_val)
 
         elif self.annotation_stage == self.STAGE_ENDPOINT:
-            self.select_endpoint(t_val, x_val, clicked_distance)
+            self.select_endpoint(row_idx, t_val, x_val, clicked_distance)
 
         elif self.annotation_stage == self.STAGE_DIST_POINTS:
             self.select_distance_point_on_hyperbola(t_val, x_val)
@@ -466,6 +474,12 @@ class MainWindow(QMainWindow):
         elif key == QtCore.Qt.Key.Key_A:
             self.handle_apex_key()
 
+        elif key == QtCore.Qt.Key.Key_H:
+            self.handle_hyperbola_key()
+
+        elif key == QtCore.Qt.Key.Key_E:
+            self.handle_endpoint_key()
+
         elif key == QtCore.Qt.Key.Key_D:
             self.handle_distance_key()
 
@@ -480,12 +494,6 @@ class MainWindow(QMainWindow):
                 self.select_next_fx_slice()
             else:
                 super().keyPressEvent(event)
-
-        elif key == QtCore.Qt.Key.Key_H:
-            if self.hyperbola_active:
-                self.finish_hyperbola_fitting()
-            else:
-                self.start_hyperbola_fitting()
 
         elif key == QtCore.Qt.Key.Key_Escape:
             self.reset_annotation(clear_control_panel=False)
@@ -502,19 +510,30 @@ class MainWindow(QMainWindow):
     # T-X apex and endpoint workflow
     # ==============================================================
     def handle_apex_key(self):
-        """A key: apex -> endpoint -> apex complete."""
+        """
+        A workflow:
 
+        First A:
+            enter apex selection mode.
+
+        Second A:
+            confirm apex selection.
+        """
         if self.cursor_mode != self.MODE_ANNOTATION:
             self.reset_annotation()
-            self.set_mode(self.MODE_ANNOTATION, self.STAGE_APEX, True)
+            self.set_mode(
+                self.MODE_ANNOTATION,
+                self.STAGE_APEX,
+                tx_annotation_active=True,
+            )
 
             self.notify(
                 cursor_mode="Apex labeling",
                 prompt=(
-                    "Apex labeling:\n"
-                    "Click the apex in the T-X plot.\n\n"
-                    "Click again to replace it.\n"
-                    "Press A for endpoint labeling."
+                    "Apex labeling:\n\n"
+                    "Click the apex in the T-X plot.\n"
+                    "Click again to replace it.\n\n"
+                    "Press A to confirm the apex."
                 ),
                 status="Select the apex.",
             )
@@ -528,45 +547,88 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            self.annotation_stage = self.STAGE_ENDPOINT
+            self.annotation_stage = self.STAGE_APEX_DONE
+            self.tx_plot_panel.annotation_mode_active = False
+
+            self.notify(
+                cursor_mode="Apex confirmed",
+                prompt=(
+                    "Apex confirmed.\n\n"
+                    "Press H to fit the arrival hyperbola and select "
+                    "Distance to cable."
+                ),
+                status="Apex confirmed.",
+            )
+
+    def handle_endpoint_key(self):
+        """
+        E workflow:
+
+        First E:
+            enter endpoint-selection mode.
+
+        Second E:
+            confirm endpoint.
+        """
+        if self.annotation_stage == self.STAGE_HYPERBOLA_DONE:
+            self.set_mode(
+                self.MODE_ANNOTATION,
+                self.STAGE_ENDPOINT,
+                tx_annotation_active=True,
+            )
+
+            # Keep apex-fitted hyperbola visible during endpoint selection.
+            self.update_hyperbola(
+                anchor="apex",
+                curve_name="apex",
+            )
 
             self.notify(
                 cursor_mode="Endpoint labeling",
                 prompt=(
-                    "Endpoint labeling:\n"
-                    "Click near the call endpoint.\n\n"
-                    "The endpoint will snap to the apex channel.\n"
-                    "Press A when done."
+                    "Endpoint labeling:\n\n"
+                    "Click near the endpoint on the apex channel.\n"
+                    "The endpoint will snap to the apex channel.\n\n"
+                    "White dashed line: apex hyperbola\n"
+                    "Cyan dashed line: endpoint hyperbola\n\n"
+                    "Press E to confirm endpoint."
                 ),
-                status="Select the endpoint.",
+                status="Select endpoint near the apex channel.",
             )
             return
 
         if self.annotation_stage == self.STAGE_ENDPOINT:
             if self.endpoint_point is None:
                 self.notify(
-                    prompt="No endpoint selected yet.\nClick near the call endpoint.",
+                    prompt="No endpoint selected yet.\nClick an endpoint first.",
                     status="Select an endpoint first.",
                 )
                 return
 
-            self.annotation_stage = self.STAGE_APEX_DONE
+            self.annotation_stage = self.STAGE_ENDPOINT_DONE
+            self.tx_plot_panel.annotation_mode_active = False
+
+            # Redraw final endpoint-anchored full hyperbola.
+            self.update_hyperbola(anchor="endpoint")
 
             self.notify(
-                cursor_mode="Apex label done",
-                prompt="Apex label done.\n\nPress D to select distance boundaries.",
-                status="Apex labeling complete.",
+                cursor_mode="Endpoint confirmed",
+                prompt=(
+                    "Endpoint confirmed.\n\n"
+                    "Press D to select two distance-side points "
+                    "along the hyperbola."
+                ),
+                status="Endpoint confirmed.",
             )
             return
 
-        if self.annotation_stage == self.STAGE_APEX_DONE:
-            self.annotation_stage = self.STAGE_APEX
-
-            self.notify(
-                cursor_mode="Apex editing",
-                prompt="Click a new apex location.\n\nPress A for endpoint labeling.",
-                status="Apex editing active.",
-            )
+        self.notify(
+            prompt=(
+                "Confirm Distance to cable before endpoint labeling.\n\n"
+                "Press H to fit and confirm the hyperbola."
+            ),
+            status="Hyperbola fitting must be confirmed first.",
+        )
 
     def select_apex(self, row_idx, t_val, x_val):
         self.apex_row_idx = row_idx
@@ -591,20 +653,23 @@ class MainWindow(QMainWindow):
             status="Apex updated.",
         )
 
-    def select_endpoint(self, t_val, x_val, clicked_distance):
-        if self.apex_point is None or self.apex_row_idx is None:
+    def select_endpoint(self, row_idx, t_val, x_val, clicked_distance=None):
+        """
+        Select endpoint time while forcing endpoint distance to the
+        current apex channel/distance.
+        """
+        if self.apex_point is None:
             self.notify(
-                prompt="No apex selected.\nPress A to return to apex labeling.",
+                prompt="No apex selected. Press A to select an apex first.",
                 status="No apex selected.",
             )
             return
 
-        apex_distance = float(
-            self.data_manager.loaded_data["x"][self.apex_row_idx]
-        )
+        # Always use the current displayed/stored apex distance.
+        apex_distance = float(self.apex_point[1])
 
         if clicked_distance is None:
-            clicked_distance = x_val
+            clicked_distance = float(x_val)
 
         dx = float(self.data_manager.h5settings.get("dx") or 1.0)
         tolerance = 100.0 * dx
@@ -614,29 +679,39 @@ class MainWindow(QMainWindow):
                 prompt=(
                     "Endpoint click is too far from the apex channel.\n\n"
                     f"Apex channel: {apex_distance:.2f} m\n"
-                    f"Clicked: {clicked_distance:.2f} m\n\n"
+                    f"Clicked: {float(clicked_distance):.2f} m\n\n"
                     "Click closer to the apex channel."
                 ),
                 status="Endpoint click is too far from apex channel.",
             )
             return
 
-        self.endpoint_point = (t_val, apex_distance)
+        # Keep clicked time, but use EXACTLY the same distance as apex.
+        self.endpoint_point = (float(t_val), apex_distance)
 
-        duration = abs(t_val - float(self.apex_point[0]))
+        duration = abs(float(t_val) - float(self.apex_point[0]))
 
-        self.tx_plot_panel.mark_endpoint_point(t_val, apex_distance)
+        self.tx_plot_panel.mark_endpoint_point(
+            float(t_val),
+            apex_distance,
+        )
+
         self.control_panel.duration_display.setText(f"{duration:.3f}")
+
+        # Keep both hyperbolas visible during endpoint labeling.
+        if self.distance_to_cable is not None:
+            self.update_hyperbola(anchor="apex", curve_name="apex")
+            self.update_hyperbola(anchor="endpoint", curve_name="endpoint")
 
         self.notify(
             prompt=(
-                f"Endpoint selected:\n\n"
-                f"Time: {t_val:.3f} s\n"
+                "Endpoint selected.\n\n"
+                f"Endpoint time: {t_val:.3f} s\n"
+                f"Endpoint channel: {apex_distance:.2f} m\n"
                 f"Duration: {duration:.3f} s\n\n"
-                "Click again to replace it.\n"
-                "Press A when done."
+                "Click again to replace endpoint, or press E to confirm."
             ),
-            status="Endpoint updated.",
+            status="Endpoint updated and snapped to apex channel.",
         )
 
     # ==============================================================
@@ -644,40 +719,39 @@ class MainWindow(QMainWindow):
     # ==============================================================
     def handle_distance_key(self):
         """
-        D key workflow:
+        D workflow:
 
         First D:
-            enter distance-point selection mode.
+            enter distance-side point selection mode.
 
-        During selection:
-            clicks retain only the latest two points.
+        Clicks:
+            keep only the latest two points snapped to the
+            endpoint-anchored hyperbola.
 
         Second D:
-            finish distance labeling.
+            confirm distance range and show only the selected
+            hyperbola segment.
         """
-        if self.apex_point is None or self.endpoint_point is None:
-            self.notify(
-                prompt="Complete apex and endpoint labeling before distance labeling.",
-                status="Apex and endpoint are required first.",
-            )
-            return
-        
-        if self.distance_to_cable is None:
+
+        # Distance labeling is available only after endpoint confirmation.
+        if self.annotation_stage not in (
+            self.STAGE_ENDPOINT_DONE,
+            self.STAGE_DIST_POINTS,
+            self.STAGE_DIST_DONE,
+        ):
             self.notify(
                 prompt=(
-                    "Fit the arrival hyperbola before selecting distance points.\n\n"
-                    "Press H and adjust the Distance to cable slider."
+                    "Confirm the endpoint before distance labeling.\n\n"
+                    "Press E to select and confirm the endpoint."
                 ),
-                status="Hyperbola fitting is required before distance labeling.",
+                status="Endpoint confirmation is required.",
             )
             return
 
-        # Start/restart distance labeling.
+        # Start or restart distance labeling.
         if self.annotation_stage in (
-            self.STAGE_APEX_DONE,
+            self.STAGE_ENDPOINT_DONE,
             self.STAGE_DIST_DONE,
-            self.STAGE_FX_DONE,
-            self.STAGE_NONE,
         ):
             self.distance_point_1 = None
             self.distance_point_2 = None
@@ -687,43 +761,49 @@ class MainWindow(QMainWindow):
             self.control_panel.dist_min_display.clear()
             self.control_panel.dist_max_display.clear()
 
+            # Remove old point markers and restore the full hyperbola.
+            self.tx_plot_panel.set_distance_annotation_points([])
+
             self.set_mode(
                 self.MODE_ANNOTATION,
                 self.STAGE_DIST_POINTS,
                 tx_annotation_active=True,
             )
 
-            self.update_hyperbola()
+            self.tx_plot_panel.clear_hyperbola("endpoint")
+            self.update_hyperbola(anchor="apex", curve_name="apex")
 
             self.notify(
                 cursor_mode="Distance labeling",
                 prompt=(
                     "Distance labeling:\n\n"
-                    "Click two points near the fitted hyperbola.\n"
-                    "Selected points snap onto the hyperbola.\n\n"
-                    f"Allowed time tolerance: ±{self.hyperbola_click_tolerance_s:.2f} s\n\n"
+                    "Click two points near the endpoint-anchored hyperbola.\n"
+                    "Selected points snap to the hyperbola.\n\n"
                     "Only the latest two points are retained.\n"
                     "Press D when distance labeling is complete."
                 ),
-                status="Select two distance points near the fitted hyperbola.",
+                status="Select two distance points near the hyperbola.",
             )
             return
 
-        # Finish distance labeling.
+        # Confirm selected distance points.
         if self.annotation_stage == self.STAGE_DIST_POINTS:
             if self.distance_point_1 is None or self.distance_point_2 is None:
                 self.notify(
                     prompt=(
                         "Select two distance points before finishing.\n\n"
-                        "The latest two selected points define distance min/max."
+                        "The latest two selected points define "
+                        "the distance range."
                     ),
                     status="Two distance points are required.",
                 )
                 return
-            # Show only the section of the hyperbola between the confirmed points.
-            self.annotation_stage = self.STAGE_DIST_DONE
 
-            self.show_confirmed_hyperbola_segment()
+            self.annotation_stage = self.STAGE_DIST_DONE
+            self.tx_plot_panel.annotation_mode_active = False
+
+            # Replace full curve with only the curve between the two points.
+            self.show_confirmed_hyperbola_segment(anchor="apex")
 
             self.notify(
                 cursor_mode="Distance label done",
@@ -1003,6 +1083,69 @@ class MainWindow(QMainWindow):
     # ==============================================================
     # Hyperbola / distance-to-cable fitting
     # ==============================================================
+    def handle_hyperbola_key(self):
+        """
+        H workflow:
+
+        First H:
+            enter hyperbola fitting mode and enable slider.
+
+        Second H:
+            confirm distance-to-cable fit.
+        """
+        if self.annotation_stage != self.STAGE_HYPERBOLA:
+            if self.annotation_stage != self.STAGE_APEX_DONE:
+                self.notify(
+                    prompt=(
+                        "Confirm the apex before hyperbola fitting.\n\n"
+                        "Press A to select and confirm the apex."
+                    ),
+                    status="Apex confirmation is required first.",
+                )
+                return
+
+            self.hyperbola_active = True
+            self.annotation_stage = self.STAGE_HYPERBOLA
+
+            if self.distance_to_cable is None:
+                self.distance_to_cable = 0.0
+
+            self.control_panel.set_distance_to_cable_enabled(True)
+            self.control_panel.set_distance_to_cable(self.distance_to_cable)
+
+            # At this stage, use apex as a temporary hyperbola anchor.
+            self.update_hyperbola(anchor="apex")
+
+            self.notify(
+                cursor_mode="Hyperbola fitting",
+                prompt=(
+                    "Hyperbola fitting mode.\n\n"
+                    "Adjust the Distance to cable slider.\n"
+                    "The hyperbola is temporarily anchored at the apex.\n\n"
+                    "Press H to confirm Distance to cable."
+                ),
+                status="Adjust Distance to cable.",
+            )
+            return
+
+        # Second H confirms the distance-to-cable fit.
+        self.hyperbola_active = False
+        self.annotation_stage = self.STAGE_HYPERBOLA_DONE
+        self.control_panel.set_distance_to_cable_enabled(False)
+        
+        # Snap the smoothly dragged apex to one actual DAS channel only now.
+        self.snap_apex_and_endpoint_to_channel()
+
+        self.notify(
+            cursor_mode="Distance to cable confirmed",
+            prompt=(
+                "Distance to cable confirmed.\n\n"
+                f"Distance to cable: {self.distance_to_cable:.1f} m\n\n"
+                "Press E to label the endpoint."
+            ),
+            status="Distance to cable confirmed.",
+        )
+
     def start_hyperbola_fitting(self):
         """
         Enable the distance-to-cable slider and show a predicted
@@ -1070,147 +1213,242 @@ class MainWindow(QMainWindow):
         if self.hyperbola_active:
             self.update_hyperbola()
 
-    def update_hyperbola(self):
-        """Recalculate and redraw the fitted arrival hyperbola."""
-        t_pred, x = self.calculate_hyperbola()
+    def update_hyperbola(self, anchor="apex", curve_name=None):
+        t_pred, x = self.calculate_hyperbola(anchor=anchor)
 
-        if t_pred is None:
+        if t_pred is None or x is None:
             return
+
+        if curve_name is None:
+            curve_name = anchor
+
+        color = "white" if anchor == "apex" else "cyan"
 
         self.tx_plot_panel.show_hyperbola(
             time_values=t_pred,
             distance_values=x,
+            curve_name=curve_name,
+            color=color,
+            style=QtCore.Qt.PenStyle.DashLine,
+            width=2,
         )
 
     def on_apex_dragged(self, new_time, new_distance):
         """
-        Update the annotation when the red apex marker is dragged.
+        Update apex position smoothly while dragging.
 
-        The endpoint moves by the same time/distance offset so its
-        relative position to the apex remains unchanged.
+        Cable-channel snapping is intentionally delayed until the user
+        confirms hyperbola fitting by pressing H.
         """
         if self.apex_point is None:
             return
 
-        old_time, old_distance = self.apex_point
+        new_time = float(new_time)
+        new_distance = float(new_distance)
 
-        delta_time = float(new_time) - float(old_time)
-        delta_distance = float(new_distance) - float(old_distance)
+        # Apex remains continuous/smooth during dragging.
+        self.apex_point = (new_time, new_distance)
 
-        # Update apex state.
-        self.apex_point = (
-            float(new_time),
-            float(new_distance),
-        )
+        self.control_panel.apex_time_display.setText(f"{new_time:.3f}")
+        self.control_panel.apex_dist_display.setText(f"{new_distance:.2f}")
 
-        # Update the left-side Apex fields.
-        self.control_panel.apex_time_display.setText(
-            f"{new_time:.3f}"
-        )
-        self.control_panel.apex_dist_display.setText(
-            f"{new_distance:.2f}"
-        )
-
-        # Move endpoint by the same offset, preserving duration and
-        # relative position from the apex.
+        # Keep endpoint aligned with the current apex distance.
         if self.endpoint_point is not None:
-            endpoint_time, endpoint_distance = self.endpoint_point
-
-            new_endpoint_time = float(endpoint_time) + delta_time
-            new_endpoint_distance = float(endpoint_distance) + delta_distance
+            endpoint_time = float(self.endpoint_point[0])
 
             self.endpoint_point = (
-                new_endpoint_time,
-                new_endpoint_distance,
+                endpoint_time,
+                new_distance,
             )
 
             self.tx_plot_panel.mark_endpoint_point(
-                new_endpoint_time,
-                new_endpoint_distance,
+                endpoint_time,
+                new_distance,
             )
 
-            duration = abs(
-                new_endpoint_time - float(new_time)
-            )
+            duration = abs(endpoint_time - new_time)
+            self.control_panel.duration_display.setText(f"{duration:.3f}")
 
-            self.control_panel.duration_display.setText(
-                f"{duration:.3f}"
-            )
+        # Update hyperbolas continuously while dragging.
+        if self.distance_to_cable is not None:
+            self.update_hyperbola(anchor="apex", curve_name="apex")
 
-        # Redraw the hyperbola if it currently exists.
-        if hasattr(self.tx_plot_panel, "hyperbola_item"):
-            if self.tx_plot_panel.hyperbola_item is not None:
-                self.update_hyperbola()
+            if self.endpoint_point is not None:
+                self.update_hyperbola(
+                    anchor="endpoint",
+                    curve_name="endpoint",
+                )
+
+    def on_endpoint_dragged(self, new_time, new_distance):
+        """
+        Drag endpoint horizontally in time.
+
+        Endpoint distance is always forced to the current apex channel.
+        The endpoint-anchored hyperbola updates continuously.
+        """
+        if self.apex_point is None or self.endpoint_point is None:
+            return
+
+        new_time = float(new_time)
+
+        # Endpoint must remain on the same cable channel as the apex.
+        apex_distance = float(self.apex_point[1])
+
+        self.endpoint_point = (
+            new_time,
+            apex_distance,
+        )
+
+        # Force visual marker back to the apex channel without recreating it.
+        self.tx_plot_panel.set_endpoint_position(
+            new_time,
+            apex_distance,
+        )
+
+        duration = abs(new_time - float(self.apex_point[0]))
+        self.control_panel.duration_display.setText(f"{duration:.3f}")
+
+        # Redraw only the endpoint curve while dragging.
+        if self.distance_to_cable is not None:
+            self.update_hyperbola(
+                anchor="endpoint",
+                curve_name="endpoint",
+            )
 
         self.notify(
             prompt=(
-                "Apex moved.\n\n"
-                f"Apex time: {new_time:.3f} s\n"
-                f"Apex distance: {new_distance:.2f} m\n\n"
-                "Endpoint and hyperbola moved with the apex."
+                "Endpoint moved.\n\n"
+                f"Endpoint time: {new_time:.3f} s\n"
+                f"Endpoint channel: {apex_distance:.2f} m\n"
+                f"Duration: {duration:.3f} s\n\n"
+                "Endpoint remains constrained to the apex channel.\n"
+                "Press E to confirm endpoint."
             ),
-            status="Apex position updated.",
+            status="Endpoint position updated.",
         )
 
-    def calculate_hyperbola(self):
+    def snap_apex_and_endpoint_to_channel(self):
         """
-        Calculate predicted hyperbola arrival times for every cable channel.
+        Snap the apex to the nearest physical DAS channel.
 
-        Returns
-        -------
-        t_pred : np.ndarray
-            Predicted arrival time at each cable distance.
-        x : np.ndarray
-            Cable distance vector.
+        If an endpoint exists, keep its time unchanged but move it to the
+        exact same cable channel as the snapped apex.
         """
-        if self.apex_point is None or self.distance_to_cable is None:
+        if self.apex_point is None:
+            return
+
+        x_vec = self.data_manager.loaded_data.get("x")
+
+        if x_vec is None or len(x_vec) == 0:
+            return
+
+        apex_time = float(self.apex_point[0])
+        apex_distance = float(self.apex_point[1])
+
+        # Nearest actual DAS channel.
+        self.apex_row_idx = int(np.argmin(np.abs(x_vec - apex_distance)))
+        snapped_distance = float(x_vec[self.apex_row_idx])
+
+        self.apex_point = (
+            apex_time,
+            snapped_distance,
+        )
+
+        # Recreate marker only once, at confirmation time.
+        self.tx_plot_panel.mark_apex_point(
+            apex_time,
+            snapped_distance,
+        )
+
+        self.control_panel.apex_time_display.setText(f"{apex_time:.3f}")
+        self.control_panel.apex_dist_display.setText(f"{snapped_distance:.2f}")
+
+        # Endpoint uses its selected time but shares the apex channel.
+        if self.endpoint_point is not None:
+            endpoint_time = float(self.endpoint_point[0])
+
+            self.endpoint_point = (
+                endpoint_time,
+                snapped_distance,
+            )
+
+            self.tx_plot_panel.mark_endpoint_point(
+                endpoint_time,
+                snapped_distance,
+            )
+
+            duration = abs(endpoint_time - apex_time)
+            self.control_panel.duration_display.setText(f"{duration:.3f}")
+
+        # The hyperbola changes slightly after snapping, so prior D points
+        # no longer necessarily lie exactly on it.
+        self.distance_point_1 = None
+        self.distance_point_2 = None
+        self.dist_min = None
+        self.dist_max = None
+
+        self.control_panel.dist_min_display.clear()
+        self.control_panel.dist_max_display.clear()
+        self.tx_plot_panel.set_distance_annotation_points([])
+
+        # Update hyperbolas after the final snapped channel is known.
+        if self.distance_to_cable is not None:
+            self.update_hyperbola(anchor="apex", curve_name="apex")
+
+            if self.endpoint_point is not None:
+                self.update_hyperbola(
+                    anchor="endpoint",
+                    curve_name="endpoint",
+                )
+
+    def calculate_hyperbola(self, anchor="apex"):
+        """
+        Calculate a hyperbola anchored exactly at either the apex or endpoint.
+
+        The minimum of the curve is guaranteed to be at:
+            (anchor_time, anchor_distance)
+        """
+        if self.distance_to_cable is None:
             return None, None
 
-        x = self.data_manager.loaded_data["x"]
+        if anchor == "endpoint":
+            anchor_point = self.endpoint_point
+        else:
+            anchor_point = self.apex_point
+
+        if anchor_point is None:
+            return None, None
+
+        x = self.data_manager.loaded_data.get("x")
 
         if x is None or len(x) == 0:
             return None, None
 
-        apex_time = float(self.apex_point[0])
-        apex_distance = float(self.apex_point[1])
+        anchor_time = float(anchor_point[0])
+        anchor_distance = float(anchor_point[1])
         distance_to_cable = float(self.distance_to_cable)
 
-        cable_direction = np.asarray(
-            self.cable_direction_3d,
-            dtype=float,
-        )
-        cable_direction /= np.linalg.norm(cable_direction)
+        # Distance along cable from the apex/endpoint channel.
+        along_cable_distance = x - anchor_distance
 
-        cable_normal = np.asarray(
-            self.cable_normal_3d,
-            dtype=float,
-        )
-        cable_normal /= np.linalg.norm(cable_normal)
-
-        cable_origin = np.asarray(
-            self.cable_origin_3d,
-            dtype=float,
+        # Source-to-cable range:
+        #
+        # rng_dir = sqrt((distance along cable)^2 + (distance to cable)^2)
+        #
+        # This is equivalent to the straight 3-D cable/source geometry,
+        # but guarantees the plotted curve uses the same coordinate system
+        # as the T-X plot.
+        rng_dir = np.sqrt(
+            along_cable_distance**2 + distance_to_cable**2
         )
 
-        # 3-D straight-line cable coordinates.
-        seg = cable_origin + np.outer(x, cable_direction)
-
-        # Cable point nearest to the whale, determined by apex distance.
-        closest_cable_location = (
-            cable_origin + apex_distance * cable_direction
-        )
-
-        # Whale/source location at selected perpendicular cable distance.
-        source_location = (
-            closest_cable_location
-            + distance_to_cable * cable_normal
-        )
-
-        # Direct source-to-cable range for every cable location.
-        rng_dir = np.linalg.norm(seg - source_location, axis=1)
-
-        # Anchor curve to the selected apex time.
-        t_pred = apex_time + (
+        # Shift relative travel times so the minimum is exactly at the
+        # selected anchor time.
+        #
+        # At x == anchor_distance:
+        # rng_dir == distance_to_cable
+        # t_pred == anchor_time
+        t_pred = anchor_time + (
             rng_dir - distance_to_cable
         ) / self.sound_speed
 
@@ -1226,7 +1464,7 @@ class MainWindow(QMainWindow):
             (snapped_time, snapped_distance) if click is close enough.
             None if the click is too far away from the hyperbola.
         """
-        t_pred, x = self.calculate_hyperbola()
+        t_pred, x = self.calculate_hyperbola(anchor="apex")
 
         if t_pred is None or x is None:
             return None
@@ -1244,22 +1482,19 @@ class MainWindow(QMainWindow):
 
         return predicted_time, snapped_distance
 
-    def show_confirmed_hyperbola_segment(self):
+    def show_confirmed_hyperbola_segment(self, anchor="endpoint"):
         """
-        Display only the hyperbola section between the two confirmed
+        Show only the hyperbola segment between the two confirmed
         distance-side points.
-
-        The points are expected to already be snapped to the hyperbola.
         """
         if self.distance_point_1 is None or self.distance_point_2 is None:
             return
 
-        t_pred, x = self.calculate_hyperbola()
+        t_pred, x = self.calculate_hyperbola(anchor=anchor)
 
         if t_pred is None or x is None:
             return
 
-        # Use the two selected cable distances as the segment bounds.
         x_1 = float(self.distance_point_1[1])
         x_2 = float(self.distance_point_2[1])
 

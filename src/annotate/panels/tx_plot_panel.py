@@ -11,6 +11,7 @@ class TXPlotPanel(QWidget):
     point_clicked = pyqtSignal(int, int, float)  # row index, time-column index, raw clicked distance in metres
     label_delete_requested = pyqtSignal(int)      # Emits tx_id for DB deletion
     apex_dragged = pyqtSignal(float, float)  # time_s, distance_m
+    endpoint_dragged = pyqtSignal(float, float)  # time_s, distance_m
 
     def __init__(self, data_manager):
         super().__init__()
@@ -37,6 +38,13 @@ class TXPlotPanel(QWidget):
         self.img_item.setVisible(False)
         self.plot_widget.addItem(self.img_item)
 
+        # Multiple hyperbola overlays can be displayed simultaneously.
+        self.hyperbola_items = {
+            "apex": None,
+            "endpoint": None,
+            "segment": None,
+        }
+
         # Annotation points
         self.annotation_points_list = []    # list of (time, dist)
         self.annotation_points_item = None
@@ -45,6 +53,7 @@ class TXPlotPanel(QWidget):
         # New apex / endpoint / distance markers
         self.apex_point_item = None
         self.endpoint_point_item = None
+        self._updating_endpoint_position = False  # Prevent recursive updates when dragging endpoint
         self.distance_annotation_item = None
         self.distance_annotation_points = []
 
@@ -397,19 +406,54 @@ class TXPlotPanel(QWidget):
 
         self.apex_point_item = None
 
-    def mark_endpoint_point(self, time_val, dist_val):
-        """Show one cyan X representing the currently selected endpoint."""
+    def mark_endpoint_point(self, time_s, distance_m):
+        """Show endpoint as a draggable cyan X."""
         self.clear_endpoint_point()
 
-        self.endpoint_point_item = pg.ScatterPlotItem(
-            x=[time_val],
-            y=[dist_val],
+        self.endpoint_point_item = pg.TargetItem(
+            pos=(time_s, distance_m),
             symbol="x",
             size=14,
             pen=pg.mkPen("cyan", width=2),
-            brush=None,
+            brush=pg.mkBrush("cyan"),
+            movable=True,
         )
+
+        self.endpoint_point_item.sigPositionChanged.connect(
+            self._on_endpoint_position_changed
+        )
+
         self.plot_widget.addItem(self.endpoint_point_item)
+
+    def _on_endpoint_position_changed(self, target_item):
+        """Emit endpoint position while dragging."""
+        if self._updating_endpoint_position:
+            return
+
+        pos = target_item.pos()
+
+        self.endpoint_dragged.emit(
+            float(pos.x()),
+            float(pos.y()),
+        )
+
+
+    def set_endpoint_position(self, time_s, distance_m):
+        """
+        Move the existing endpoint marker without recreating it.
+
+        Used while dragging so the marker remains smooth and is constrained
+        to the apex cable channel.
+        """
+        if self.endpoint_point_item is None:
+            self.mark_endpoint_point(time_s, distance_m)
+            return
+
+        self._updating_endpoint_position = True
+        try:
+            self.endpoint_point_item.setPos(time_s, distance_m)
+        finally:
+            self._updating_endpoint_position = False
 
     def clear_endpoint_point(self):
         """Remove the current endpoint marker."""
@@ -495,39 +539,54 @@ class TXPlotPanel(QWidget):
         interp_t = np.interp(all_x[mask], pts_x, pts_t)
         return list(zip(interp_t, all_x[mask]))
     
-    def show_hyperbola(self, time_values, distance_values):
+    def show_hyperbola(self, time_values, distance_values, curve_name="apex", color="white", style=Qt.PenStyle.DashLine, width=2):
         """
-        Draw/update the predicted hyperbola.
+        Draw or update a named hyperbola curve.
 
-        The T-X plot uses:
-            x axis = time
-            y axis = cable distance
+        curve_name:
+            "apex"     - hyperbola anchored at apex
+            "endpoint" - hyperbola anchored at endpoint
+            "segment"  - final confirmed hyperbola segment
         """
-        if self.hyperbola_item is not None:
-            try:
-                self.plot_widget.removeItem(self.hyperbola_item)
-            except Exception:
-                pass
+        if curve_name not in self.hyperbola_items:
+            self.hyperbola_items[curve_name] = None
 
-        self.hyperbola_item = pg.PlotDataItem(
+        old_item = self.hyperbola_items[curve_name]
+
+        if old_item is not None:
+            self.plot_widget.removeItem(old_item)
+
+        curve = pg.PlotDataItem(
             x=time_values,
             y=distance_values,
             pen=pg.mkPen(
-                color=(255, 255, 255),
-                width=2,
-                style=Qt.PenStyle.DashLine,
+                color=color,
+                width=width,
+                style=style,
             ),
         )
 
-        self.plot_widget.addItem(self.hyperbola_item)
+        self.plot_widget.addItem(curve)
+        self.hyperbola_items[curve_name] = curve
 
 
-    def clear_hyperbola(self):
-        """Remove the predicted hyperbola from the T-X plot."""
-        if self.hyperbola_item is not None:
-            try:
-                self.plot_widget.removeItem(self.hyperbola_item)
-            except Exception:
-                pass
+    def clear_hyperbola(self, curve_name=None):
+        """
+        Remove one named hyperbola or all hyperbola overlays.
 
-        self.hyperbola_item = None
+        curve_name=None removes every hyperbola.
+        """
+        if curve_name is not None:
+            item = self.hyperbola_items.get(curve_name)
+
+            if item is not None:
+                self.plot_widget.removeItem(item)
+
+            self.hyperbola_items[curve_name] = None
+            return
+
+        for name, item in self.hyperbola_items.items():
+            if item is not None:
+                self.plot_widget.removeItem(item)
+
+            self.hyperbola_items[name] = None
