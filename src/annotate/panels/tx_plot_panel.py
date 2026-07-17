@@ -10,6 +10,7 @@ from annotate.config import PLOTCOLOR_LUT, UserSettings
 class TXPlotPanel(QWidget):
     point_clicked = pyqtSignal(int, int, float)  # row index, time-column index, raw clicked distance in metres
     label_delete_requested = pyqtSignal(int)      # Emits tx_id for DB deletion
+    apex_dragged = pyqtSignal(float, float)  # time_s, distance_m
 
     def __init__(self, data_manager):
         super().__init__()
@@ -46,6 +47,12 @@ class TXPlotPanel(QWidget):
         self.endpoint_point_item = None
         self.distance_annotation_item = None
         self.distance_annotation_points = []
+
+        # Existing saved labels currently drawn on the T-X plot
+        self.existing_label_items = []
+        self.existing_labels_metadata = []
+
+        self.hyperbola_item = None
 
         # Toggle from MainWindow when annotation stage is active
         self.annotation_mode_active = False
@@ -101,46 +108,89 @@ class TXPlotPanel(QWidget):
         })
 
     def show_existing_labels(self, labels):
-        self.hide_existing_labels()
-        self.existing_label_items = []
-        self.existing_labels_metadata = []
+        """
+        Show saved labels.
 
-        t0 = self.data_manager.loaded_data['time_stamps'][0]
+        Colors:
+        - Red dots: apex and distance-side points.
+        - Yellow dashed line: saved/reconstructed hyperbola segment.
+        """
+        self.hide_existing_labels()
 
         for label in labels:
-            # apex_time_local is already relative to window start -- no contour anymore
-            apex_time_rel = label['apex_time_local']
-            apex_dist = label['apex_dist']
+            apex_time = float(label["apex_time_local"])
+            apex_distance = float(label["apex_dist"])
 
-            # Single marker for the apex (no more contour line)
+            # Always show saved apex as a red dot.
             apex_item = pg.ScatterPlotItem(
-                x=[apex_time_rel],
-                y=[apex_dist],
-                symbol='o',
+                x=[apex_time],
+                y=[apex_distance],
+                symbol="o",
                 size=8,
-                pen=pg.mkPen('m', width=1),
-                brush=pg.mkBrush('m')
+                pen=pg.mkPen("red", width=1),
+                brush=pg.mkBrush("red"),
             )
+
             self.plot_widget.addItem(apex_item)
             self.existing_label_items.append(apex_item)
 
-            # store metadata for click-to-delete lookup
-            self.existing_labels_metadata.append({
-                'tx_id': label['tx_id'],
-                'uid': label['uid'],
-                'apex_time_rel': apex_time_rel,
-                'apex_distance': apex_dist
-            })
+            self.existing_labels_metadata.append(
+                {
+                    "tx_id": int(label["tx_id"]),
+                    "uid": label["uid"],
+                    "apex_time_rel": apex_time,
+                    "apex_distance": apex_distance,
+                }
+            )
+
+            # Labels without distance-to-cable metadata show apex only.
+            segment = label.get("hyperbola_segment")
+            if not segment:
+                continue
+
+            times = segment.get("times")
+            distances = segment.get("distances")
+            side_points = segment.get("side_points", [])
+
+            if times is None or distances is None or len(times) == 0:
+                continue
+
+            # Yellow dashed hyperbola segment.
+            hyperbola_item = pg.PlotDataItem(
+                x=times,
+                y=distances,
+                pen=pg.mkPen(
+                    color="yellow",
+                    width=2,
+                    style=Qt.PenStyle.DashLine,
+                ),
+            )
+
+            self.plot_widget.addItem(hyperbola_item)
+            self.existing_label_items.append(hyperbola_item)
+
+            # Red dots at the two selected distance-side points.
+            if side_points:
+                side_item = pg.ScatterPlotItem(
+                    x=[point[0] for point in side_points],
+                    y=[point[1] for point in side_points],
+                    symbol="o",
+                    size=8,
+                    pen=pg.mkPen("red", width=1),
+                    brush=pg.mkBrush("red"),
+                )
+
+                self.plot_widget.addItem(side_item)
+                self.existing_label_items.append(side_item)
 
     def hide_existing_labels(self):
-        """Remove existing label markers from the plot."""
-        if hasattr(self, 'existing_label_items'):
-            for item in self.existing_label_items:
-                try:
-                    self.plot_widget.removeItem(item)
-                except Exception:
-                    pass
-            self.existing_label_items.clear()
+        """Remove all displayed existing-label markers and hyperbola segments."""
+        for item in self.existing_label_items:
+            self.plot_widget.removeItem(item)  # Corrected method call
+
+        self.existing_label_items.clear()
+        self.existing_labels_metadata.clear()
+
     #####################################################################
     # Plot extras
     #####################################################################
@@ -305,23 +355,37 @@ class TXPlotPanel(QWidget):
     #####################################################################
     # Apex / Endpoint / Distance Annotations
     #####################################################################
-    def mark_apex_point(self, time_val, dist_val):
-        """Show one red star representing the currently selected apex."""
-        if self.apex_point_item is not None:
-            try:
-                self.plot_widget.removeItem(self.apex_point_item)
-            except Exception:
-                pass
+    def mark_apex_point(self, time_s, distance_m):
+        """
+        Show the apex as a draggable red star.
 
-        self.apex_point_item = pg.ScatterPlotItem(
-            x=[time_val],
-            y=[dist_val],
+        Dragging emits apex_dragged(time_s, distance_m).
+        """
+        self.clear_apex_point()
+
+        self.apex_point_item = pg.TargetItem(
+            pos=(time_s, distance_m),
             symbol="star",
-            size=12,
+            size=14,
+            pen=pg.mkPen("red", width=2),
             brush=pg.mkBrush("red"),
-            pen=pg.mkPen("red"),
+            movable=True,
         )
+
+        self.apex_point_item.sigPositionChanged.connect(
+            self._on_apex_position_changed
+        )
+
         self.plot_widget.addItem(self.apex_point_item)
+
+    def _on_apex_position_changed(self, target_item):
+        """Emit the new apex position while the user drags the apex marker."""
+        pos = target_item.pos()
+
+        self.apex_dragged.emit(
+            float(pos.x()),
+            float(pos.y()),
+        )
 
     def clear_apex_point(self):
         """Remove the current apex marker."""
@@ -393,7 +457,7 @@ class TXPlotPanel(QWidget):
     # Clear overlays
     #####################################################################
     def clear_annotation_overlays(self):
-        """Remove temporary apex, endpoint, and distance annotation markers."""
+        """Remove temporary apex, endpoint, distance annotation markers, and hyperbola."""
 
         # Legacy contour items; safe to retain while old code remains.
         for item in (
@@ -414,6 +478,7 @@ class TXPlotPanel(QWidget):
         self.clear_apex_point()
         self.clear_endpoint_point()
         self.set_distance_annotation_points([])
+        self.clear_hyperbola()
 
     #####################################################################
     # Interpolation
@@ -430,3 +495,39 @@ class TXPlotPanel(QWidget):
         interp_t = np.interp(all_x[mask], pts_x, pts_t)
         return list(zip(interp_t, all_x[mask]))
     
+    def show_hyperbola(self, time_values, distance_values):
+        """
+        Draw/update the predicted hyperbola.
+
+        The T-X plot uses:
+            x axis = time
+            y axis = cable distance
+        """
+        if self.hyperbola_item is not None:
+            try:
+                self.plot_widget.removeItem(self.hyperbola_item)
+            except Exception:
+                pass
+
+        self.hyperbola_item = pg.PlotDataItem(
+            x=time_values,
+            y=distance_values,
+            pen=pg.mkPen(
+                color=(255, 255, 255),
+                width=2,
+                style=Qt.PenStyle.DashLine,
+            ),
+        )
+
+        self.plot_widget.addItem(self.hyperbola_item)
+
+
+    def clear_hyperbola(self):
+        """Remove the predicted hyperbola from the T-X plot."""
+        if self.hyperbola_item is not None:
+            try:
+                self.plot_widget.removeItem(self.hyperbola_item)
+            except Exception:
+                pass
+
+        self.hyperbola_item = None

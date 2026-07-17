@@ -14,6 +14,7 @@ class ControlPanel(QWidget):
     refresh_requested = pyqtSignal()
     toggle_labels_requested = pyqtSignal(bool)
     confirm_label_requested = pyqtSignal(int)   # emits label_num (0 = cancel/remove)
+    distance_to_cable_changed = pyqtSignal(float)
 
     def __init__(self, data_manager):
         super().__init__()
@@ -110,11 +111,22 @@ class ControlPanel(QWidget):
         self.apex_time_display = QLineEdit()
         self.apex_dist_display = QLineEdit()
         self.duration_display = QLineEdit()
-        self.dist_to_cable_display = QLineEdit()
         self.dist_max_display = QLineEdit()
         self.dist_min_display = QLineEdit()
         self.freq_max_display = QLineEdit()
         self.freq_min_display = QLineEdit()
+
+        self.dist_to_cable_display = QLineEdit()
+        self.dist_to_cable_display.setReadOnly(True)
+
+        self.dist_to_cable_slider = QSlider(Qt.Orientation.Horizontal)
+        self.dist_to_cable_slider.setRange(0, 10000)   # metres
+        self.dist_to_cable_slider.setValue(0)
+        self.dist_to_cable_slider.setEnabled(False)
+
+        self.dist_to_cable_slider.valueChanged.connect(
+            self._on_distance_to_cable_changed
+        )
 
         self._readonly_fields = [
             self.apex_time_display, self.apex_dist_display,
@@ -128,7 +140,11 @@ class ControlPanel(QWidget):
         annot_form.addRow("Apex time (s):", self.apex_time_display)
         annot_form.addRow("Apex dist (m):", self.apex_dist_display)
         annot_form.addRow("Duration (s):", self.duration_display)
-        annot_form.addRow("Dist. to cable (m):", self.dist_to_cable_display)
+
+        distance_to_cable_layout = QVBoxLayout()
+        distance_to_cable_layout.addWidget(self.dist_to_cable_display)
+        distance_to_cable_layout.addWidget(self.dist_to_cable_slider)
+        annot_form.addRow("Dist. to cable (m):", distance_to_cable_layout)
 
         # Combine dist max/min into one row
         dist_row_layout = QHBoxLayout()
@@ -229,6 +245,8 @@ class ControlPanel(QWidget):
         for field in self._readonly_fields:
             field.clear()
 
+        self.clear_distance_to_cable()
+
     #####################################################################
     # Settings dict (label_mapping now comes from fixed config, not edits)
     #####################################################################
@@ -249,3 +267,24 @@ class ControlPanel(QWidget):
         # Label mapping is now fixed (from config), not user-editable text boxes
         settings['label_mapping'] = DEFAULT_LABEL_MAPPING
         return settings
+    
+    def _on_distance_to_cable_changed(self, value):
+        distance_m = float(value)
+        self.dist_to_cable_display.setText(f"{distance_m:.1f}")
+        self.distance_to_cable_changed.emit(distance_m)
+
+
+    def set_distance_to_cable_enabled(self, enabled):
+        """Enable the slider only during hyperbola fitting mode."""
+        self.dist_to_cable_slider.setEnabled(enabled)
+
+
+    def set_distance_to_cable(self, distance_m):
+        """Set slider/display without requiring user interaction."""
+        self.dist_to_cable_slider.setValue(int(round(distance_m)))
+
+
+    def clear_distance_to_cable(self):
+        self.dist_to_cable_slider.setValue(0)
+        self.dist_to_cable_display.clear()
+        self.dist_to_cable_slider.setEnabled(False)

@@ -358,7 +358,11 @@ class LabelSaver:
             "apex_time_local": apex_time_local,
             "apex_dist": apex_dist,
             "duration": duration,
-            "distance_to_cable": distance_to_cable,
+            "distance_to_cable": (
+                float(distance_to_cable)
+                if distance_to_cable is not None
+                else None
+            ),
             "dist_max": dist_max,
             "dist_min": dist_min,
             "f_max": np.nan,   # filled in via save_fx_label

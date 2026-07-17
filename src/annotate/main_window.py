@@ -1,8 +1,9 @@
-from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QSplitter, QFileDialog, QScrollArea
+from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QSplitter, QFileDialog, QScrollArea, QMessageBox
 from PyQt6 import QtCore
 from PyQt6.QtCore import QTimer
 from datetime import datetime, timezone
 import os, uuid
+import numpy as np
 
 from annotate.data_manager import PreprocessedDataManager
 from annotate.panels.control_panel import ControlPanel
@@ -122,6 +123,7 @@ class MainWindow(QMainWindow):
         self.fx_plot_panel.point_clicked.connect(self.on_point_clicked)
         self.tx_plot_panel.label_delete_requested.connect(self.on_delete_label)
         self.fx_plot_panel.roi_changed.connect(self.on_fx_roi_changed)
+        self.tx_plot_panel.apex_dragged.connect(self.on_apex_dragged)
 
         # === Navigation buttons ===
         self.control_panel.btn_back.clicked.connect(lambda: self.data_manager.navigate('backward'))
@@ -132,11 +134,12 @@ class MainWindow(QMainWindow):
         self.control_panel.refresh_requested.connect(self.on_apply_changes)
         self.control_panel.confirm_label_requested.connect(self.save_annotation)
 
-        # === Apex, Endpoint, and Distance labeling buttons ===
+        self.control_panel.distance_to_cable_changed.connect(self.on_distance_to_cable_changed)
+
+        # === T-X annotation state ===
         self.apex_point = None
         self.apex_row_idx = None
         self.endpoint_point = None
-
         self.distance_point_1 = None
         self.distance_point_2 = None
         self.dist_min = None
@@ -146,6 +149,24 @@ class MainWindow(QMainWindow):
         self.active_fx_slice_indices = []
         self.f_min = None
         self.f_max = None
+
+        # Hyperbola / distance-to-cable fitting state
+        self.hyperbola_active = False
+        self.distance_to_cable = None
+
+        # Acoustic propagation speed in water, m/s.
+        self.sound_speed = 1500.0
+        # Maximum allowed time difference (in seconds) between click and fitted hyperbola.
+        self.hyperbola_click_tolerance_s = 1.0
+
+        # Geometry assumptions for a straight 3-D cable.
+        # Replace these later with actual cable geometry/metadata if available.
+        self.cable_origin_3d = np.array([0.0, 0.0, 0.0])
+        self.cable_direction_3d = np.array([1.0, 0.0, 0.0])
+
+        # Direction perpendicular to the cable in which the whale is placed.
+        # Here this means "downward" in Z. Change if your coordinate system differs.
+        self.cable_normal_3d = np.array([0.0, 0.0, -1.0])
 
         # Build menu
         self.create_menu()
@@ -225,11 +246,14 @@ class MainWindow(QMainWindow):
         self.active_fx_slice_indices = []
         self.f_min = None
         self.f_max = None
+        self.hyperbola_active = False
+        self.distance_to_cable = None   
 
         self.clear_all_annotation_overlays()
 
         if clear_control_panel:
             self.control_panel.clear_annotation_preview()
+        self.control_panel.clear_distance_to_cable()
 
         if hasattr(self.fx_series_panel, "clear_annotation_slice_highlights"):
             self.fx_series_panel.clear_annotation_slice_highlights()
@@ -403,7 +427,7 @@ class MainWindow(QMainWindow):
             self.select_endpoint(t_val, x_val, clicked_distance)
 
         elif self.annotation_stage == self.STAGE_DIST_POINTS:
-            self.select_distance_point(t_val, x_val)
+            self.select_distance_point_on_hyperbola(t_val, x_val)
 
     def select_spectrogram_row(self, row_idx):
         dist_val = float(self.data_manager.loaded_data["x"][row_idx])
@@ -456,6 +480,12 @@ class MainWindow(QMainWindow):
                 self.select_next_fx_slice()
             else:
                 super().keyPressEvent(event)
+
+        elif key == QtCore.Qt.Key.Key_H:
+            if self.hyperbola_active:
+                self.finish_hyperbola_fitting()
+            else:
+                self.start_hyperbola_fitting()
 
         elif key == QtCore.Qt.Key.Key_Escape:
             self.reset_annotation(clear_control_panel=False)
@@ -631,6 +661,16 @@ class MainWindow(QMainWindow):
                 status="Apex and endpoint are required first.",
             )
             return
+        
+        if self.distance_to_cable is None:
+            self.notify(
+                prompt=(
+                    "Fit the arrival hyperbola before selecting distance points.\n\n"
+                    "Press H and adjust the Distance to cable slider."
+                ),
+                status="Hyperbola fitting is required before distance labeling.",
+            )
+            return
 
         # Start/restart distance labeling.
         if self.annotation_stage in (
@@ -653,16 +693,19 @@ class MainWindow(QMainWindow):
                 tx_annotation_active=True,
             )
 
+            self.update_hyperbola()
+
             self.notify(
                 cursor_mode="Distance labeling",
                 prompt=(
                     "Distance labeling:\n\n"
-                    "Click two points on the lower side of the call.\n\n"
-                    "If you click more than two points, only the latest two "
-                    "points are retained.\n\n"
-                    "Press D when the distance range is correct."
+                    "Click two points near the fitted hyperbola.\n"
+                    "Selected points snap onto the hyperbola.\n\n"
+                    f"Allowed time tolerance: ±{self.hyperbola_click_tolerance_s:.2f} s\n\n"
+                    "Only the latest two points are retained.\n"
+                    "Press D when distance labeling is complete."
                 ),
-                status="Select two distance points.",
+                status="Select two distance points near the fitted hyperbola.",
             )
             return
 
@@ -677,8 +720,10 @@ class MainWindow(QMainWindow):
                     status="Two distance points are required.",
                 )
                 return
-
+            # Show only the section of the hyperbola between the confirmed points.
             self.annotation_stage = self.STAGE_DIST_DONE
+
+            self.show_confirmed_hyperbola_segment()
 
             self.notify(
                 cursor_mode="Distance label done",
@@ -692,37 +737,58 @@ class MainWindow(QMainWindow):
                 status="Distance labeling complete.",
             )
 
-    def select_distance_point(self, t_val, x_val):
+    def select_distance_point_on_hyperbola(self, clicked_time, clicked_distance):
         """
-        Keep only the newest two distance points.
+        Select a distance-side point constrained to the fitted hyperbola.
 
-        Click 1: point_1
-        Click 2: point_1 + point_2
-        Click 3+: discard oldest point, retain newest two.
+        The clicked point may be near the curve. If it is within the configured
+        time tolerance, the stored point is snapped exactly onto the hyperbola.
+
+        Only the two most recent distance points are retained.
         """
-        new_point = (t_val, x_val)
+        snapped_point = self.snap_point_to_hyperbola(
+            clicked_time,
+            clicked_distance,
+        )
 
+        if snapped_point is None:
+            self.notify(
+                prompt=(
+                    "Distance point is too far from the fitted hyperbola.\n\n"
+                    f"Allowed time tolerance: ±{self.hyperbola_click_tolerance_s:.2f} s\n\n"
+                    "Click closer to the white dashed hyperbola."
+                ),
+                status="Distance point must be selected near the hyperbola.",
+            )
+            return
+
+        snapped_time, snapped_distance = snapped_point
+        new_point = (snapped_time, snapped_distance)
+
+        # First click.
         if self.distance_point_1 is None:
             self.distance_point_1 = new_point
 
-            # Show the first yellow marker immediately.
             self.update_distance_markers()
 
             self.notify(
                 prompt=(
-                    "First distance point selected.\n\n"
-                    f"Distance: {x_val:.2f} m\n\n"
-                    "Click a second point to calculate min/max.\n"
-                    "Press D when both points are correct."
+                    "First distance point selected on hyperbola.\n\n"
+                    f"Time: {snapped_time:.3f} s\n"
+                    f"Distance: {snapped_distance:.2f} m\n\n"
+                    "Click a second point on the hyperbola.\n"
+                    "Press D when the two selected points are correct."
                 ),
-                status="First distance point selected.",
+                status="First hyperbola distance point selected.",
             )
             return
 
+        # Second click.
         if self.distance_point_2 is None:
             self.distance_point_2 = new_point
+
+        # Third and later clicks: retain only latest two points.
         else:
-            # Keep only the latest two clicked points.
             self.distance_point_1 = self.distance_point_2
             self.distance_point_2 = new_point
 
@@ -732,15 +798,18 @@ class MainWindow(QMainWindow):
         self.dist_min = min(d1, d2)
         self.dist_max = max(d1, d2)
 
-        self.control_panel.dist_min_display.setText(f"{self.dist_min:.2f}")
-        self.control_panel.dist_max_display.setText(f"{self.dist_max:.2f}")
+        self.control_panel.dist_min_display.setText(
+            f"{self.dist_min:.2f}"
+        )
+        self.control_panel.dist_max_display.setText(
+            f"{self.dist_max:.2f}"
+        )
 
-        # Redraw yellow markers using the latest two points.
         self.update_distance_markers()
 
         self.notify(
             prompt=(
-                "Distance points selected.\n\n"
+                "Distance points selected on hyperbola.\n\n"
                 f"Point 1: {self.distance_point_1[1]:.2f} m\n"
                 f"Point 2: {self.distance_point_2[1]:.2f} m\n"
                 f"Minimum distance: {self.dist_min:.2f} m\n"
@@ -748,8 +817,9 @@ class MainWindow(QMainWindow):
                 "Click again to replace the oldest point.\n"
                 "Press D when distance labeling is done."
             ),
-            status="Distance range updated.",
+            status="Distance range updated from hyperbola points.",
         )
+    
     # ==============================================================
     # F-X bounding-box workflow
     # ==============================================================
@@ -931,6 +1001,282 @@ class MainWindow(QMainWindow):
         )
 
     # ==============================================================
+    # Hyperbola / distance-to-cable fitting
+    # ==============================================================
+    def start_hyperbola_fitting(self):
+        """
+        Enable the distance-to-cable slider and show a predicted
+        arrival-time hyperbola anchored at the selected apex.
+        """
+        if self.apex_point is None:
+            self.notify(
+                prompt=(
+                    "Select an apex before entering hyperbola fitting mode."
+                ),
+                status="Apex selection is required for hyperbola fitting.",
+            )
+            return
+
+        self.hyperbola_active = True
+
+        # Use previous value if available; otherwise start at zero.
+        if self.distance_to_cable is None:
+            self.distance_to_cable = 0.0
+
+        self.control_panel.set_distance_to_cable_enabled(True)
+        self.control_panel.set_distance_to_cable(self.distance_to_cable)
+
+        self.update_hyperbola()
+
+        self.notify(
+            cursor_mode="Hyperbola fitting",
+            prompt=(
+                "Hyperbola fitting mode.\n\n"
+                "Use the Distance to cable slider on the left.\n"
+                "The predicted arrival curve updates live in the T-X plot.\n\n"
+                "Press H when the fit is satisfactory."
+            ),
+            status="Hyperbola fitting mode active.",
+        )
+
+    def finish_hyperbola_fitting(self):
+        """Leave fitting mode while retaining the selected cable distance."""
+        if not self.hyperbola_active:
+            return
+
+        self.hyperbola_active = False
+        self.control_panel.set_distance_to_cable_enabled(False)
+
+        distance_text = (
+            f"{self.distance_to_cable:.1f} m"
+            if self.distance_to_cable is not None
+            else "not selected"
+        )
+
+        self.notify(
+            cursor_mode="Normal",
+            prompt=(
+                "Hyperbola fitting complete.\n\n"
+                f"Distance to cable: {distance_text}\n\n"
+                "You may continue labeling or click Confirm & Save."
+            ),
+            status="Hyperbola fitting complete.",
+        )
+
+    def on_distance_to_cable_changed(self, distance_m):
+        """Update the visible hyperbola while the user moves the slider."""
+        self.distance_to_cable = float(distance_m)
+
+        if self.hyperbola_active:
+            self.update_hyperbola()
+
+    def update_hyperbola(self):
+        """Recalculate and redraw the fitted arrival hyperbola."""
+        t_pred, x = self.calculate_hyperbola()
+
+        if t_pred is None:
+            return
+
+        self.tx_plot_panel.show_hyperbola(
+            time_values=t_pred,
+            distance_values=x,
+        )
+
+    def on_apex_dragged(self, new_time, new_distance):
+        """
+        Update the annotation when the red apex marker is dragged.
+
+        The endpoint moves by the same time/distance offset so its
+        relative position to the apex remains unchanged.
+        """
+        if self.apex_point is None:
+            return
+
+        old_time, old_distance = self.apex_point
+
+        delta_time = float(new_time) - float(old_time)
+        delta_distance = float(new_distance) - float(old_distance)
+
+        # Update apex state.
+        self.apex_point = (
+            float(new_time),
+            float(new_distance),
+        )
+
+        # Update the left-side Apex fields.
+        self.control_panel.apex_time_display.setText(
+            f"{new_time:.3f}"
+        )
+        self.control_panel.apex_dist_display.setText(
+            f"{new_distance:.2f}"
+        )
+
+        # Move endpoint by the same offset, preserving duration and
+        # relative position from the apex.
+        if self.endpoint_point is not None:
+            endpoint_time, endpoint_distance = self.endpoint_point
+
+            new_endpoint_time = float(endpoint_time) + delta_time
+            new_endpoint_distance = float(endpoint_distance) + delta_distance
+
+            self.endpoint_point = (
+                new_endpoint_time,
+                new_endpoint_distance,
+            )
+
+            self.tx_plot_panel.mark_endpoint_point(
+                new_endpoint_time,
+                new_endpoint_distance,
+            )
+
+            duration = abs(
+                new_endpoint_time - float(new_time)
+            )
+
+            self.control_panel.duration_display.setText(
+                f"{duration:.3f}"
+            )
+
+        # Redraw the hyperbola if it currently exists.
+        if hasattr(self.tx_plot_panel, "hyperbola_item"):
+            if self.tx_plot_panel.hyperbola_item is not None:
+                self.update_hyperbola()
+
+        self.notify(
+            prompt=(
+                "Apex moved.\n\n"
+                f"Apex time: {new_time:.3f} s\n"
+                f"Apex distance: {new_distance:.2f} m\n\n"
+                "Endpoint and hyperbola moved with the apex."
+            ),
+            status="Apex position updated.",
+        )
+
+    def calculate_hyperbola(self):
+        """
+        Calculate predicted hyperbola arrival times for every cable channel.
+
+        Returns
+        -------
+        t_pred : np.ndarray
+            Predicted arrival time at each cable distance.
+        x : np.ndarray
+            Cable distance vector.
+        """
+        if self.apex_point is None or self.distance_to_cable is None:
+            return None, None
+
+        x = self.data_manager.loaded_data["x"]
+
+        if x is None or len(x) == 0:
+            return None, None
+
+        apex_time = float(self.apex_point[0])
+        apex_distance = float(self.apex_point[1])
+        distance_to_cable = float(self.distance_to_cable)
+
+        cable_direction = np.asarray(
+            self.cable_direction_3d,
+            dtype=float,
+        )
+        cable_direction /= np.linalg.norm(cable_direction)
+
+        cable_normal = np.asarray(
+            self.cable_normal_3d,
+            dtype=float,
+        )
+        cable_normal /= np.linalg.norm(cable_normal)
+
+        cable_origin = np.asarray(
+            self.cable_origin_3d,
+            dtype=float,
+        )
+
+        # 3-D straight-line cable coordinates.
+        seg = cable_origin + np.outer(x, cable_direction)
+
+        # Cable point nearest to the whale, determined by apex distance.
+        closest_cable_location = (
+            cable_origin + apex_distance * cable_direction
+        )
+
+        # Whale/source location at selected perpendicular cable distance.
+        source_location = (
+            closest_cable_location
+            + distance_to_cable * cable_normal
+        )
+
+        # Direct source-to-cable range for every cable location.
+        rng_dir = np.linalg.norm(seg - source_location, axis=1)
+
+        # Anchor curve to the selected apex time.
+        t_pred = apex_time + (
+            rng_dir - distance_to_cable
+        ) / self.sound_speed
+
+        return t_pred, x
+
+    def snap_point_to_hyperbola(self, clicked_time, clicked_distance):
+        """
+        Snap a clicked T-X point to the nearest cable channel on the hyperbola.
+
+        Returns
+        -------
+        tuple | None
+            (snapped_time, snapped_distance) if click is close enough.
+            None if the click is too far away from the hyperbola.
+        """
+        t_pred, x = self.calculate_hyperbola()
+
+        if t_pred is None or x is None:
+            return None
+
+        # Find nearest cable channel to the clicked distance.
+        row_idx = int(np.argmin(np.abs(x - clicked_distance)))
+
+        predicted_time = float(t_pred[row_idx])
+        snapped_distance = float(x[row_idx])
+
+        time_error = abs(float(clicked_time) - predicted_time)
+
+        if time_error > self.hyperbola_click_tolerance_s:
+            return None
+
+        return predicted_time, snapped_distance
+
+    def show_confirmed_hyperbola_segment(self):
+        """
+        Display only the hyperbola section between the two confirmed
+        distance-side points.
+
+        The points are expected to already be snapped to the hyperbola.
+        """
+        if self.distance_point_1 is None or self.distance_point_2 is None:
+            return
+
+        t_pred, x = self.calculate_hyperbola()
+
+        if t_pred is None or x is None:
+            return
+
+        # Use the two selected cable distances as the segment bounds.
+        x_1 = float(self.distance_point_1[1])
+        x_2 = float(self.distance_point_2[1])
+
+        x_min = min(x_1, x_2)
+        x_max = max(x_1, x_2)
+
+        mask = (x >= x_min) & (x <= x_max)
+
+        if not np.any(mask):
+            return
+
+        self.tx_plot_panel.show_hyperbola(
+            time_values=t_pred[mask],
+            distance_values=x[mask],
+        )
+
+    # ==============================================================
     # Saving, displaying, and deleting labels
     # ==============================================================
     def save_annotation(self, label_num):
@@ -1057,6 +1403,11 @@ class MainWindow(QMainWindow):
                 source_file=source_file,
                 label=int(label_num),
                 label_name=label_name,
+                distance_to_cable=(
+                    float(self.distance_to_cable)
+                    if self.distance_to_cable is not None
+                    else None
+                ),
             )
         except Exception as exc:
             message = f"Failed to save T-X annotation: {exc}"
@@ -1156,29 +1507,194 @@ class MainWindow(QMainWindow):
         self.reset_annotation(clear_control_panel=True)
 
     def on_toggle_labels(self, show):
-        """Show or hide existing TX labels in current time window."""
-        if show:
-            labels = self.data_manager.get_labels_in_current_window()
-            self.tx_plot_panel.show_existing_labels(labels)
-            self.statusBar().showMessage(f"Showing {len(labels)} existing labels in window")
-            self.control_panel.toggle_labels_button.setText("Hide Existing Labels")
-            self.show_labels = True
-        else:
+        """Show or hide existing labels in the current T-X data window."""
+        if not show:
             self.tx_plot_panel.hide_existing_labels()
+            self.control_panel.toggle_labels_button.setText(
+                "Show Existing Labels"
+            )
             self.statusBar().showMessage("Existing labels hidden")
-            self.control_panel.toggle_labels_button.setText("Show Existing Labels")
             self.show_labels = False
+            return
+
+        labels = self.data_manager.get_labels_in_current_window()
+
+        # Add reconstructed hyperbola information where possible.
+        for label in labels:
+            label["hyperbola_segment"] = self.get_existing_label_hyperbola_segment(
+                label
+            )
+
+        self.tx_plot_panel.show_existing_labels(labels)
+
+        self.control_panel.toggle_labels_button.setText(
+            "Hide Existing Labels"
+        )
+        self.statusBar().showMessage(
+            f"Showing {len(labels)} existing labels in window"
+        )
+        self.show_labels = True
     
     def on_delete_label(self, tx_id):
-        """Remove label from DB and refresh overlays."""
-        if self.data_manager.label_saver:
-            self.data_manager.label_saver.remove_label_by_id(tx_id)
-            refreshed = self.data_manager.get_labels_in_current_window()
-            self.tx_plot_panel.show_existing_labels(refreshed)
-            self.statusBar().showMessage(f"Removed label {tx_id}")
-    
+        """Ask for confirmation before permanently deleting a saved label."""
 
+        if self.data_manager.label_saver is None:
+            self.statusBar().showMessage("No label file is currently loaded.")
+            return
 
+        reply = QMessageBox.question(
+            self,
+            "Delete Annotation",
+            (
+                f"Do you really want to delete annotation ID {tx_id}?\n\n"
+                "This action permanently removes the label from the CSV file."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
 
+        if reply != QMessageBox.StandardButton.Yes:
+            self.statusBar().showMessage("Delete cancelled.")
+            return
+
+        self.data_manager.label_saver.remove_label_by_id(tx_id)
+
+        # Refresh visible existing-label overlays.
+        if self.show_labels:
+            refreshed_labels = self.data_manager.get_labels_in_current_window()
+            self.tx_plot_panel.show_existing_labels(refreshed_labels)
+
+        self.statusBar().showMessage(f"Removed label {tx_id}.")
+        
+    def calculate_hyperbola_for_label(
+        self,
+        apex_time,
+        apex_distance,
+        distance_to_cable,
+    ):
+        """
+        Calculate the full predicted arrival curve for a saved label.
+
+        Returns:
+            t_pred: predicted arrival times
+            x: cable-distance vector
+        """
+        x = self.data_manager.loaded_data.get("x")
+
+        if x is None or len(x) == 0:
+            return None, None
+
+        try:
+            apex_time = float(apex_time)
+            apex_distance = float(apex_distance)
+            distance_to_cable = float(distance_to_cable)
+        except (TypeError, ValueError):
+            return None, None
+
+        if not np.isfinite(distance_to_cable):
+            return None, None
+
+        cable_direction = np.asarray(
+            self.cable_direction_3d,
+            dtype=float,
+        )
+        cable_direction /= np.linalg.norm(cable_direction)
+
+        cable_normal = np.asarray(
+            self.cable_normal_3d,
+            dtype=float,
+        )
+        cable_normal /= np.linalg.norm(cable_normal)
+
+        cable_origin = np.asarray(
+            self.cable_origin_3d,
+            dtype=float,
+        )
+
+        # 3-D coordinates of every cable segment/channel.
+        seg = cable_origin + np.outer(x, cable_direction)
+
+        # Closest point on the cable to the whale source.
+        closest_cable_location = (
+            cable_origin + apex_distance * cable_direction
+        )
+
+        # Source location perpendicular to cable at selected distance.
+        source_location = (
+            closest_cable_location
+            + distance_to_cable * cable_normal
+        )
+
+        rng_dir = np.linalg.norm(seg - source_location, axis=1)
+
+        # Anchor arrival curve to saved apex time.
+        t_pred = apex_time + (
+            rng_dir - distance_to_cable
+        ) / self.sound_speed
+
+        return t_pred, x
+
+    def get_existing_label_hyperbola_segment(self, label):
+        """
+        Return a hyperbola segment for an existing label.
+
+        Returns:
+            {
+                "times": np.ndarray,
+                "distances": np.ndarray,
+                "side_points": [(time_1, dist_1), (time_2, dist_2)]
+            }
+
+        Returns None when the label has no valid distance-to-cable annotation.
+        """
+        try:
+            distance_to_cable = float(label.get("distance_to_cable"))
+            dist_min = float(label.get("dist_min"))
+            dist_max = float(label.get("dist_max"))
+        except (TypeError, ValueError):
+            return None
+
+        # No fitted hyperbola exists if any required value is missing.
+        if not (
+            np.isfinite(distance_to_cable)
+            and np.isfinite(dist_min)
+            and np.isfinite(dist_max)
+        ):
+            return None
+
+        t_pred, x = self.calculate_hyperbola_for_label(
+            apex_time=label["apex_time_local"],
+            apex_distance=label["apex_dist"],
+            distance_to_cable=distance_to_cable,
+        )
+
+        if t_pred is None or x is None:
+            return None
+
+        lower_distance = min(dist_min, dist_max)
+        upper_distance = max(dist_min, dist_max)
+
+        mask = (x >= lower_distance) & (x <= upper_distance)
+
+        if not np.any(mask):
+            return None
+
+        segment_times = t_pred[mask]
+        segment_distances = x[mask]
+
+        # Make endpoint markers precisely at nearest available cable channels.
+        min_idx = int(np.argmin(np.abs(x - lower_distance)))
+        max_idx = int(np.argmin(np.abs(x - upper_distance)))
+
+        side_points = [
+            (float(t_pred[min_idx]), float(x[min_idx])),
+            (float(t_pred[max_idx]), float(x[max_idx])),
+        ]
+
+        return {
+            "times": segment_times,
+            "distances": segment_distances,
+            "side_points": side_points,
+        }
 
 
