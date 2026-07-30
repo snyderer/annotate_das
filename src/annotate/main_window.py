@@ -3,7 +3,7 @@ from PyQt6 import QtCore
 from datetime import datetime, timezone
 import os, uuid
 
-from annotate.data_manager import PreprocessedDataManager
+from annotate.data_manager import DataManager
 from annotate.panels.control_panel import ControlPanel
 from annotate.panels.tx_plot_panel import TXPlotPanel
 from annotate.panels.spectrogram_panel import SpectrogramPanel
@@ -24,7 +24,7 @@ class MainWindow(QMainWindow):
         self.show_labels = False # show existing labels toggle
 
         # --- Core data manager ---
-        self.data_manager = PreprocessedDataManager()
+        self.data_manager = DataManager()
 
         # --- Central layout ---
         central_widget = QWidget()

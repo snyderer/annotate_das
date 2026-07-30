@@ -6,12 +6,29 @@ from dataclasses import dataclass
 #   Data Classes
 # -------------------------------------
 @dataclass
-class UserSettings: # control panel settings
+class UserSettings:
     start_time: str = ""
-    duration_s: float = 30.0    # duration of data shown in TX plot
-    fx_win_s: float = 2.0       # duration of each FX plot
-    nfft: int = 256             # FFT length used for spectrogram calculation
+
+    # Display/navigation
+    duration_s: float = 60.0
+    navigation_step_s: float = 30.0
+
+    # Loading / processing
+    max_display_freq_hz: float = 100.0
+    bandpass_enabled: bool = True
+    f_lo_hz: float = 5.0
+    f_hi_hz: float = 70.0
+
+    fk_filter_enabled: bool = False
+    c_min_mps: float = 1400
+    c_max_mps: float = 6000
+
+    # FX / spectrogram
+    fx_win_s: float = 2.0
+    nfft: int = 256
     overlap: float = 75
+
+    # Display levels
     tx_vmin: float = 0.0
     tx_vmax: float = 0.4
     fx_vmin: float = 0.0

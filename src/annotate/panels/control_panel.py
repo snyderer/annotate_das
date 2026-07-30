@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout, QHBoxLayout,
     QPushButton, QDoubleSpinBox, QSpinBox, QSlider, QLineEdit, QLabel,
-    QFileDialog
+    QFileDialog, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from annotate.config import (
