@@ -24,6 +24,7 @@ class UserSettings: # control panel settings
 # -------------------------------------
 # Mapping from number keys (1–9) to descriptive label strings
 DEFAULT_LABEL_MAPPING = {
+    0: "Remove",
     1: "Bp_B",
     2: "Bp_A",
     3: "Bp_40Hz",
@@ -35,8 +36,8 @@ DEFAULT_LABEL_MAPPING = {
     9: "noise"
 }
 
-DEFAULT_DATASET_PATH = r"F:"
-DEFAULT_SAVE_PATH = r"C:\Users\ers334\Documents\databases\DAS_Annotations\A25.db"
+DEFAULT_DATASET_PATH = r"G:\svalbard_full"
+DEFAULT_SAVE_PATH = r"G:\DAS_Annotations\svalbard_full_labels.csv"
 
 # -------------------------------------
 #   Plot color map definition(s)

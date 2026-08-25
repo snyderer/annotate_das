@@ -23,11 +23,23 @@ class TextDisplayPanel(QWidget):
         self.cursor_mode_label = QLabel("Cursor Mode: Normal")
         self.cursor_mode_label.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
 
+        # Annotation workflow prompt
+        self.annotation_prompt_label = QLabel("No annotation in progress.")
+        self.annotation_prompt_label.setWordWrap(True)
+        self.annotation_prompt_label.setStyleSheet(
+            "font-weight: bold; font-size: 12px; color: #0033cc; "
+            "background-color: #f4f7ff; "
+            "border: 1px solid #c8d5f0; "
+            "padding: 6px;"
+        )
+
+
         # Layout order
         layout.addWidget(self.filename_label)
         layout.addWidget(self.timestamp_label)
         layout.addWidget(separator)
         layout.addWidget(self.cursor_mode_label)
+        layout.addWidget(self.annotation_prompt_label)
 
         # Another place to add more status/info text later
         self.info_label = QLabel("")
@@ -47,3 +59,7 @@ class TextDisplayPanel(QWidget):
     def update_info_text(self, info_text):
         """Change the content of the info label."""
         self.info_label.setText(info_text)
+
+    def set_annotation_prompt(self, text):
+        """Show the current annotation instruction beside the spectrogram."""
+        self.annotation_prompt_label.setText(text)
