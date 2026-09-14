@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 from PyQt6.QtGui import QPen
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QRectF
 import pyqtgraph as pg
 from annotate.config import PLOTCOLOR_LUT, UserSettings
 import numpy as np
@@ -29,8 +29,7 @@ class SpectrogramPanel(QWidget):
         plot_item = self.plot_widget.getPlotItem()
         plot_item.setLabel('bottom', 'time', units='s')
         plot_item.setLabel('left', 'frequency', units='Hz')
-        self.plot_widget.setTitle("Spectrogram")
-
+        
         # Image for spectrogram
         self.img_item = pg.ImageItem(axisOrder='row-major')
         self.img_item.setLookupTable(PLOTCOLOR_LUT)
@@ -74,15 +73,19 @@ class SpectrogramPanel(QWidget):
         # Transform coords for correct frequency/time axes
         f0, f1 = freqs[0], freqs[-1]
         t0, t1 = times[0], times[-1]
-        width = Sxx.shape[1]
-        height = Sxx.shape[0]
-        tr = pg.QtGui.QTransform()
-        tr.scale((t1 - t0) / width, (f1 - f0) / height)
-        tr.translate(t0, f0)
-        self.img_item.setTransform(tr)
+        self.img_item.setRect(
+            QRectF(
+                float(times[0]),
+                float(freqs[0]),
+                float(times[-1] - times[0]),
+                float(freqs[-1] - freqs[0]),
+            )
+        )
 
         dist_val = self.data_manager.loaded_data['x'][row_idx]
-        self.plot_widget.setTitle(f"Spectrogram (row {row_idx}: {dist_val:.2f} m)")
+        self.plot_widget.setTitle(
+            f"Spectrogram (row {row_idx}: {dist_val:.2f} m)"
+        )
 
     def on_settings_changed(self):
         self.update_settings()
@@ -94,8 +97,8 @@ class SpectrogramPanel(QWidget):
         self.vmin = user_settings['spec_vmin']/100
         self.vmax = user_settings['spec_vmax']/100
         self.use_db = user_settings.get('spec_use_db', self.use_db)
-        self.data_manager.spectrogram_manager.nfft = user_settings['nfft']
-        self.data_manager.spectrogram_manager.percent_overlap = user_settings['overlap']
+        self.data_manager.spectrogram_manager.nfft = user_settings['spec_nfft']
+        self.data_manager.spectrogram_manager.percent_overlap = user_settings['spec_overlap']
 
     def refresh_with_current_row(self):
         if hasattr(self, "last_row_idx") and self.last_row_idx is not None:

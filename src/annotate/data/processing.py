@@ -9,11 +9,13 @@ LoadedWindow from load_window().
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 import scipy.signal as sp
+import das4whales as dw
+from annotate.models import RawDASSegment
 
 
 # ============================================================================
@@ -429,14 +431,19 @@ def apply_processing(
                 "Cannot apply f-k filtering without a valid channel spacing."
             )
 
-        # This is intentionally left for the next implementation stage.
-        # You can implement it with DAS4Whales or a custom 2-D f-k filter.
         amp = fk_filter(
             amp=amp,
             fs=fs,
             dx_m=dx_m,
-            c_min_m_s=settings.get("c_min_m_s"),
-            c_max_m_s=settings.get("c_max_m_s"),
+            c_min_m_s=settings.get("c_min_mps"),
+            c_max_m_s=settings.get("c_max_mps"),
+
+            # Normally make the F-K frequency range match the selected bandpass.
+            f_min_hz=settings.get("f_lo_hz"),
+            f_max_hz=settings.get("f_hi_hz"),
+
+            # Never show DAS4Whales matplotlib filter windows from the GUI.
+            display_filter=False,
         )
 
     if settings.get("downsample_for_display", False):
@@ -590,16 +597,231 @@ def fk_filter(
     dx_m: float,
     c_min_m_s: float | None,
     c_max_m_s: float | None,
+    f_min_hz: float | None = None,
+    f_max_hz: float | None = None,
+    display_filter: bool = False,
 ) -> np.ndarray:
     """
-    Placeholder for future f-k filtering.
+    Apply DAS4Whales hybrid F-K velocity filter.
 
-    Keep this function here so both source loaders use the same f-k filter
-    implementation once it exists.
+    Parameters
+    ----------
+    amp:
+        Data with shape (n_channels, n_time_samples).
 
-    For now, leave `fk_filter_enabled` False in GUI settings.
+    fs:
+        Current temporal sampling rate in Hz.
+
+    dx_m:
+        Actual spatial channel spacing in metres after any channel decimation.
+
+    c_min_m_s, c_max_m_s:
+        Minimum and maximum apparent velocity bounds in m/s.
+
+    f_min_hz, f_max_hz:
+        Frequency range where the F-K velocity filter should be active.
+        These should normally match or lie inside the bandpass range.
+
+    display_filter:
+        If True, DAS4Whales displays the designed filter. Keep False in GUI
+        operation because it creates additional plotting windows.
+
+    Returns
+    -------
+    np.ndarray
+        Filtered data with the same shape as amp.
     """
-    raise NotImplementedError(
-        "f-k filtering has not been implemented yet. "
-        "Disable 'Enable f-k filter' in loading settings."
-    )
+    amp = np.asarray(amp, dtype=np.float32)
+
+    if amp.ndim != 2:
+        raise ValueError(
+            "F-K filtering requires amp shaped "
+            "(n_channels, n_time_samples)."
+        )
+
+    n_channels, n_samples = amp.shape
+
+    if n_channels < 2:
+        raise ValueError(
+            "F-K filtering requires at least two spatial channels."
+        )
+
+    if n_samples < 2:
+        raise ValueError(
+            "F-K filtering requires at least two time samples."
+        )
+
+    if fs <= 0:
+        raise ValueError(f"F-K filtering requires fs > 0; got {fs}.")
+
+    if dx_m <= 0:
+        raise ValueError(
+            f"F-K filtering requires dx_m > 0; got {dx_m}."
+        )
+
+    if c_min_m_s is None or c_max_m_s is None:
+        raise ValueError(
+            "F-K filtering requires both c_min_m_s and c_max_m_s."
+        )
+
+    c_min_m_s = float(c_min_m_s)
+    c_max_m_s = float(c_max_m_s)
+
+    if c_min_m_s <= 0 or c_max_m_s <= 0:
+        raise ValueError(
+            "F-K velocity bounds must both be positive."
+        )
+
+    if c_min_m_s >= c_max_m_s:
+        raise ValueError(
+            "F-K minimum velocity must be less than maximum velocity."
+        )
+
+    nyquist_hz = fs / 2.0
+
+    # Default F-K frequency range.
+    if f_min_hz is None:
+        f_min_hz = 0.0
+
+    if f_max_hz is None:
+        f_max_hz = nyquist_hz * 0.95
+
+    f_min_hz = max(0.0, float(f_min_hz))
+    f_max_hz = min(float(f_max_hz), nyquist_hz * 0.95)
+
+    if f_max_hz <= f_min_hz:
+        raise ValueError(
+            "Invalid F-K frequency bounds: "
+            f"f_min={f_min_hz}, f_max={f_max_hz}, "
+            f"Nyquist={nyquist_hz}."
+        )
+
+    # The data have already been spatially selected/decimated before
+    # reaching this function. Therefore describe the array as a contiguous
+    # channel sequence with stride 1 and use dx_m as the actual spacing.
+    #
+    # DAS4Whales uses selected_channels to infer spatial sampling. Since dx_m
+    # is already the resolved spacing of the current data matrix, this is:
+    selected_channels = (0, n_channels, 1)
+
+    fk_params = {
+        "c_min": c_min_m_s,
+        "c_max": c_max_m_s,
+        "fmin": f_min_hz,
+        "fmax": f_max_hz,
+    }
+
+    try:
+        fk_mask = dw.dsp.hybrid_ninf_gs_filter_design(
+            amp.shape,
+            selected_channels,
+            dx_m,
+            fs,
+            fk_params,
+            display_filter=display_filter,
+        )
+
+        filtered = dw.dsp.fk_filter_sparsefilt(
+            amp,
+            fk_mask,
+            tapering=False,
+        )
+
+    except Exception as exc:
+        raise RuntimeError(
+            "DAS4Whales F-K filtering failed. "
+            f"shape={amp.shape}, fs={fs}, dx_m={dx_m}, "
+            f"c_min={c_min_m_s}, c_max={c_max_m_s}, "
+            f"fmin={f_min_hz}, fmax={f_max_hz}."
+        ) from exc
+
+    return np.asarray(filtered, dtype=np.float32)
+
+def stitch_file_offsets(
+    pieces: list[RawDASSegment],
+    edge_duration_s: float = 0.25,
+) -> list[RawDASSegment]:
+    """
+    Remove per-channel constant offsets between contiguous DAS file pieces.
+
+    Each source file may have an arbitrary baseline offset. This function
+    shifts every channel in each subsequent file so that its beginning
+    matches the end of the preceding file.
+
+    Parameters
+    ----------
+    pieces:
+        Segments sorted in time order. Each must have data shaped
+        (n_channels, n_time_samples).
+
+    edge_duration_s:
+        Duration at each side of a file boundary used to estimate the
+        baseline. A median over this window is robust to spikes/calls.
+
+    Returns
+    -------
+    list[RawDASSegment]
+        New segments with corrected per-channel offsets. The first segment
+        is unchanged; each later segment is shifted relative to prior data.
+    """
+    if len(pieces) <= 1:
+        return pieces
+
+    corrected: list[RawDASSegment] = [pieces[0]]
+
+    for current in pieces[1:]:
+        previous = corrected[-1]
+
+        if not np.isclose(previous.fs_hz, current.fs_hz):
+            raise ValueError(
+                "Cannot stitch file offsets when sampling rates differ: "
+                f"{previous.fs_hz} vs {current.fs_hz}"
+            )
+
+        if previous.data.shape[0] != current.data.shape[0]:
+            raise ValueError(
+                "Cannot stitch file offsets when channel counts differ: "
+                f"{previous.data.shape[0]} vs {current.data.shape[0]}"
+            )
+
+        n_edge = max(1, int(round(edge_duration_s * current.fs_hz)))
+
+        # Avoid requesting more samples than are available in either piece.
+        n_edge = min(
+            n_edge,
+            previous.data.shape[1],
+            current.data.shape[1],
+        )
+
+        # Median is safer than using exactly the final/first sample,
+        # which may be noisy or contain an arrival.
+        previous_level = np.median(
+            previous.data[:, -n_edge:],
+            axis=1,
+        )
+
+        current_level = np.median(
+            current.data[:, :n_edge],
+            axis=1,
+        )
+
+        # Shape: (n_channels, 1), so broadcasting shifts every time sample
+        # of each channel by its own correction.
+        offset = (previous_level - current_level)[:, np.newaxis]
+
+        corrected_data = current.data + offset
+
+        corrected.append(
+            replace(
+                current,
+                data=corrected_data,
+                metadata={
+                    **current.metadata,
+                    "boundary_offset_corrected": True,
+                    "boundary_edge_duration_s": edge_duration_s,
+                    "boundary_offset_per_channel": offset[:, 0],
+                },
+            )
+        )
+
+    return corrected
