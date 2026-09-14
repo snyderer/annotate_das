@@ -1041,7 +1041,8 @@ class MainWindow(QMainWindow):
             )
 
         else:
-            super().keyPressEvent(event)
+            self.distance_point_1 = self.distance_point_2
+            self.distance_point_2 = new_point
 
     def handle_label_shortcut(self, label_num: int) -> None:
         """Select label in UI and attempt to save the current annotation."""

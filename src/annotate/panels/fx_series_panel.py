@@ -58,6 +58,10 @@ class FXSeriesPanel(QWidget):
         # F-X slice indices relevant to the current annotation.
         self.annotation_slice_indices: set[int] = set()
 
+        # F-X thumbnail indices that overlap the currently annotated call.
+        # Empty unless F-X box annotation mode is active.
+        self.annotation_slice_indices = set()
+
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
 

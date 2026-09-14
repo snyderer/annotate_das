@@ -39,6 +39,13 @@ class TXPlotPanel(QWidget):
         self.img_item.setVisible(False)
         self.plot_widget.addItem(self.img_item)
 
+        # Multiple hyperbola overlays can be displayed simultaneously.
+        self.hyperbola_items = {
+            "apex": None,
+            "endpoint": None,
+            "segment": None,
+        }
+
         # Annotation points
         self.apex_point_item = None
         self.endpoint_point_item = None
@@ -429,9 +436,8 @@ class TXPlotPanel(QWidget):
                 tx_id = self.existing_labels_metadata[idx]["tx_id"]
                 self.label_delete_requested.emit(tx_id)
             
-
     #####################################################################
-    # Apex
+    # Apex / Endpoint / Distance Annotations
     #####################################################################
     def _remove_apex_point(self) -> None:
         """Remove the current editable apex marker."""

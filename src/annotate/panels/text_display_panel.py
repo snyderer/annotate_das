@@ -38,6 +38,7 @@ class TextDisplayPanel(QWidget):
         layout.addWidget(self.timestamp_label)
         layout.addWidget(separator)
         layout.addWidget(self.cursor_mode_label)
+        layout.addWidget(self.annotation_prompt_label)
 
         # Another place to add more status/info text later
         self.info_label = QLabel("")
