@@ -1,10 +1,9 @@
 pyproject.toml
 src/annotate/__init__.py
 src/annotate/config.py
-src/annotate/data_io.py
-src/annotate/data_manager.py
 src/annotate/main.py
 src/annotate/main_window.py
+src/annotate/models.py
 src/annotate/run_annotate.py
 src/annotate.egg-info/PKG-INFO
 src/annotate.egg-info/SOURCES.txt
@@ -12,6 +11,13 @@ src/annotate.egg-info/dependency_links.txt
 src/annotate.egg-info/entry_points.txt
 src/annotate.egg-info/requires.txt
 src/annotate.egg-info/top_level.txt
+src/annotate/data/das4whales_loaderDELETE.py
+src/annotate/data/data_loaderDELETE.py
+src/annotate/data/data_managerDELETE.py
+src/annotate/data/dataset_reader.py
+src/annotate/data/dataset_service.py
+src/annotate/data/file_index.py
+src/annotate/data/processing.py
 src/annotate/panels/__init__.py
 src/annotate/panels/control_panel.py
 src/annotate/panels/fx_plot_panel.py

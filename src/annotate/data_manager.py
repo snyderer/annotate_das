@@ -1,412 +1,543 @@
-import pandas as pd
-import numpy as np
-import os, sqlite3, json, uuid, getpass, datetime
-from PyQt6.QtCore import QObject, pyqtSignal
-import scipy.signal as sp
-from . import data_io as io
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-class PreprocessedDataManager(QObject):
-    dataset_loaded = pyqtSignal()      # tell panels to redraw with whatever data is loaded
-    settings_changed = pyqtSignal()    # for appearance-only changes in TX/FX plots
-    file_loaded = pyqtSignal(str, str)  # filename, timestamp_string
+import numpy as np
+import scipy.signal as sp
+from PyQt6.QtCore import QObject, pyqtSignal
+
+from annotate.config import UserSettings
+
+from annotate.data.dataset_service import DatasetService, FileRecord
+from annotate.data.processing import apply_processing
+
+from time import perf_counter # For debugging performance
+
+class DataManager(QObject):
+
+    dataset_loaded = pyqtSignal()
+    settings_changed = pyqtSignal()
+    file_loaded = pyqtSignal(str, str)
+
+    dataset_opened = pyqtSignal(object)   # FileRecord
+    window_changed = pyqtSignal(object)   # datetime
 
     def __init__(self):
         super().__init__()
-        self.h5settings = {
-            'fs': None, 'dx': None, 'ns': None, 'nx': None,
-            'nonzeros_mask': None, 'file_map': {}
+
+        self.dataset_service = DatasetService()
+
+        self.user_settings = asdict(UserSettings())
+
+        self.current_start_time: datetime | None = None
+        self.selected_channels: tuple[int, int, int] | None = None
+        self.dataset_record: FileRecord | None = None
+
+        self.filepath: str | None = None
+        self.directory: str | None = None
+
+        self.loaded_segment = None
+        self.loaded_fs_hz: float | None = None
+
+        self.raw_window_segment = None
+        
+        self.loaded_data = {
+            "amp": None,
+            "t": None,
+            "x": None,
+            "time_stamps": None,
         }
-        self.filepath = ''
-        self.directory = ''
-        self.label_saver = None 
 
-        self.loaded_files_indices = []
-        self.cursor_mode = ''  # '', 's' (spectrogram), 'a' (annotation)
+        self.cursor_mode = ""
 
-        # Loaded continuous data
-        self.loaded_data = {'amp': None, 't': None, 'x': None, 'time_stamps': None}
-        self.display_idx = None
-
-        # Store last applied user settings (sliders etc.)
-        self._user_settings = {}
-
-        # FX / Spectrogram managers
+        # annotation-related attributes
+        self.label_saver = None
+        self.annotation_fx_box = None
+        self.annotation_fx_boxes_per_plot = None
+        self.annotation_rois_per_slice = {}
+        
         self.fx_manager = FXHandle(self)
         self.spectrogram_manager = SpectrogramHandle(self)
-
-    def apply_user_settings(self, user_settings: dict):
-        """Store UI settings (vmin/vmax, nfft, overlap, label mapping, etc.)"""
-        self._user_settings = user_settings
-        self.settings_changed.emit()
-
-    def get_user_settings(self, name=None):
-        if name is None:
-            return self._user_settings
-        return self._user_settings.get(name)
-
-    def new_file_selected(self, filepath):
-        """Load the selected file + following file into a 60s window."""
-        filepath = os.path.normpath(filepath)
-        self.filepath = filepath
-        selected_directory = os.path.dirname(filepath)
-        selected_filename = os.path.basename(filepath)
-
-        if selected_directory != self.directory:
-            # directory has changed, reload settings
-            self.directory = selected_directory
-            # Load dataset settings (h5)
-            settings_filepath = io.find_settings_h5(filepath)
-            if settings_filepath is None:
-                raise ValueError("No settings.h5 file found.")
-            self.set_h5settings(settings_filepath)
-
-        # Ensure filenames is a Python list
-        filenames = list(self.h5settings['file_map']['filename'])
-        try:
-            idx = filenames.index(selected_filename)
-        except ValueError:
-            raise RuntimeError(f"File {filepath} not in file_map")
-
-        # Choose previous/current/next file indices
-        indices = [i for i in [idx, idx + 1]
-                if 0 <= i < len(filenames)]
-        self.loaded_files_indices = indices
-
-        # Initial load: recompute FX as well
-        self.load_current_window(recompute_fx=True)
-
-    def navigate(self, direction):
-        """Move the 60s window forward/backward by 30s – TX only update."""
-        filenames = self.h5settings['file_map']['filename']
-        # TODO set self.filepath as the new first file in window
         
-        if direction == 'forward':
-            last_idx = self.loaded_files_indices[-1]
-            next_idx = last_idx + 1
-            if next_idx >= len(filenames):
-                print("Already at end of dataset.")
-                return
-            self.loaded_files_indices.pop(0)
-            self.loaded_files_indices.append(next_idx)
-
-        elif direction == 'backward':
-            first_idx = self.loaded_files_indices[0]
-            prev_idx = first_idx - 1
-            if prev_idx < 0:
-                print("Already at beginning of dataset.")
-                return
-            self.loaded_files_indices.pop()
-            self.loaded_files_indices.insert(0, prev_idx)
-
-        # update plots (including fx)
-        self.load_current_window(recompute_fx=True)
-
-    def load_current_window(self, recompute_fx=True):
-        """Load and concatenate the files in `loaded_files_indices`."""
-        amp_list, ts_list = [], []
-        x = None
-        for idx in self.loaded_files_indices:
-            filepath = os.path.join(self.directory, self.h5settings['file_map']['filename'][idx])
-            amp, t, x, ts = self.load_and_rehydrate_h5(filepath)
-            amp_list.append(amp)
-            ts_list.append(np.atleast_1d(ts))  # ensure array shape
-
-        amp = np.concatenate(amp_list, axis=1)
-        time_stamps = np.concatenate(ts_list)
-
-        fs = self.h5settings['fs']
-        total_samples = amp.shape[1]
-        tvec = np.arange(total_samples) / fs
-
-        self.loaded_data['amp'] = amp
-        self.loaded_data['x'] = x
-        self.loaded_data['time_stamps'] = time_stamps
-        self.loaded_data['t'] = tvec
-
-        # Always display the entire window (retained for future use)
-        self.display_idx = np.ones(total_samples, dtype=bool)
-
-        if recompute_fx:
-            self.fx_manager.update_data()
-            self.spectrogram_manager.update_data()
+        self.raw_window_segment = None
         
-        self._emit_file_info() # update filename/timestamp display
-        self.dataset_loaded.emit()
+    def _resolve_selected_channels(self) -> tuple[int, int, int]:
+        """
+        Convert user physical cable settings into DAS4Whales channel settings.
 
-    def _emit_file_info(self):
-        """Emit file_loaded signal with current file info."""
-        if self.loaded_data is not None and 'time_stamps' in self.loaded_data:
-            # Get the current loaded filenames
-            filenames_str = self.get_loaded_filenames_string()
-            timestamp_str = self.get_start_timestamp_string()
-            self.file_loaded.emit(filenames_str, timestamp_str)
+        Returns:
+            (start_channel_index, end_channel_index, channel_stride)
+        """
+        if self.dataset_record is None:
+            raise RuntimeError("No dataset metadata are available.")
 
-    def get_loaded_filenames_string(self):
-        """Get a formatted string of currently loaded filenames."""
-        filenames = self.h5settings['file_map']['filename'][self.loaded_files_indices]
-        return ", ".join(filenames)
+        settings = self.user_settings
 
-    def get_start_timestamp_string(self):
-        """Get formatted timestamp string for the current data window."""
-        try:
-            if (self.loaded_data and 
-                'time_stamps' in self.loaded_data and 
-                self.loaded_data['time_stamps'] is not None and
-                len(self.loaded_data['time_stamps']) > 0):
-                
-                start_timestamp = self.loaded_data['time_stamps'][0]
-                dt = datetime.datetime.fromtimestamp(start_timestamp, tz=datetime.timezone.utc)
-                return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " UTC"
-        except Exception as e:
-            return f"Error reading timestamp: {str(e)}"
+        n_channels = self.dataset_record.n_channels
+        native_dx_m = self.dataset_record.dx_m
+
+        start_distance_m = float(
+            self.dataset_record.metadata["start_distance_m"]
+        )
+        end_distance_m = float(
+            self.dataset_record.metadata["end_distance_m"]
+        )
+
+        if settings.get("use_full_cable_length", True):
+            start_index = 0
+            end_index = n_channels
+        else:
+            requested_start_m = float(settings["cable_start_m"])
+            requested_end_m = float(settings["cable_end_m"])
+
+            requested_start_m = max(
+                start_distance_m,
+                min(requested_start_m, end_distance_m),
+            )
+            requested_end_m = max(
+                start_distance_m,
+                min(requested_end_m, end_distance_m),
+            )
+
+            if requested_end_m <= requested_start_m:
+                raise ValueError(
+                    "Resolved cable end distance must be greater than start distance."
+                )
+
+            start_index = int(
+                round((requested_start_m - start_distance_m) / native_dx_m)
+            )
+            end_index = int(
+                round((requested_end_m - start_distance_m) / native_dx_m)
+            )
+
+            start_index = max(0, min(start_index, n_channels - 1))
+            end_index = max(start_index + 1, min(end_index, n_channels))
+
+        requested_dx_m = float(
+            settings.get("target_dx_m", native_dx_m)
+        )
+
+        stride = max(1, int(round(requested_dx_m / native_dx_m)))
+
+        return start_index, end_index, stride
+       
+    def open_raw_dataset(
+            self,
+            filepath: str | Path,
+            settings: dict,
+        ) -> None:
+            """
+            Open/index a raw DAS dataset directory and load the first window.
+            """
+            filepath = Path(filepath).resolve()
+
+            self.apply_user_settings(settings)
+
+            self.dataset_record = self.dataset_service.open_dataset(
+                selected_file=filepath,
+                requested_interrogator=self.user_settings.get(
+                    "interrogator",
+                    "auto",
+                ),
+            )
+
+            self.filepath = str(filepath)
+            self.directory = str(filepath.parent)
+
+            self.current_start_time = self.dataset_record.start_time
+
+            self.selected_channels = self._resolve_selected_channels()
+
+            self.dataset_opened.emit(self.dataset_record)
+
+            self.load_current_window(recompute_fx=True)
+
+            self.file_loaded.emit(
+                filepath.name,
+                self.current_start_time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            )
+
+    def load_raw_current_window(self) -> None:
+            """
+            Load, crop, stitch, and assemble the current raw DAS window.
+
+            This is the expensive disk-I/O step. It should only run when the
+            requested time window, source dataset, cable range, channel spacing,
+            or boundary-correction settings change.
+            """
+            if not self.dataset_service.is_open:
+                raise RuntimeError("No raw DAS dataset is open.")
+
+            if self.current_start_time is None:
+                raise RuntimeError("No current start time is set.")
+
+            if self.selected_channels is None:
+                raise RuntimeError("No DAS channel range is selected.")
+
+            duration_s = float(
+                self.user_settings.get("duration_s", 30.0)
+            )
+
+            self.raw_window_segment = self.dataset_service.load_window(
+                start_time=self.current_start_time,
+                duration_s=duration_s,
+                selected_channels=self.selected_channels,
+                correct_file_boundaries=self.user_settings.get(
+                    "file_boundary_correction_enabled",
+                    True,
+                ),
+                boundary_edge_duration_s=float(
+                    self.user_settings.get(
+                        "file_boundary_edge_duration_s",
+                        0.25,
+                    )
+                ),
+            )
+
+            self.current_start_time = self.raw_window_segment.start_time
+
+    def reprocess_current_window(
+            self,
+            recompute_fx: bool = True,
+        ) -> None:
+            """
+            Reapply bandpass/F-K/downsampling/display conversion to the currently
+            loaded raw window without rereading source files.
+            """
+            if self.raw_window_segment is None:
+                raise RuntimeError("No raw DAS window has been loaded.")
+
+            amp, fs_processed = apply_processing(
+                amp=self.raw_window_segment.data,
+                fs=self.raw_window_segment.fs_hz,
+                dx_m=self.raw_window_segment.dx_m,
+                settings=self.user_settings,
+            )
+
+            amp_display = amp * 1e9
+            
+            t = np.arange(
+                amp_display.shape[1],
+                dtype=float,
+            ) / fs_processed
+
+            self.loaded_segment = self.raw_window_segment
+            self.loaded_fs_hz = fs_processed
+
+            self.loaded_data = {
+                "amp": amp_display,
+                "t": t,
+                "x": self.raw_window_segment.distance_m,
+                "time_stamps": np.array([
+                    self.raw_window_segment.start_time.timestamp()
+                ]),
+            }
+
+            self.current_start_time = self.raw_window_segment.start_time
+            self.window_changed.emit(self.current_start_time)
+
+            if recompute_fx:
+                self._recompute_fx_for_current_window()
+
+            self.dataset_loaded.emit()
+    
+    def load_current_window(self, recompute_fx: bool = True) -> None:
+        """
+        Perform a full raw-data load followed by processing.
+
+        Use this for:
+        - opening a dataset;
+        - navigation;
+        - changing cable range / target dx;
+        - changing duration;
+        - changing boundary-correction settings.
+        """
+        self.load_raw_current_window()
+        self.reprocess_current_window(
+            recompute_fx=recompute_fx,
+        )
+    
+    def navigate(self, direction: str) -> None:
+            """Move the current display window by the configured step size."""
+            if self.current_start_time is None:
+                raise RuntimeError("Open a dataset before navigating.")
+
+            step_s = float(
+                self.user_settings.get("navigation_step_s", 30.0)
+            )
+
+            if direction == "forward":
+                delta_s = step_s
+            elif direction == "backward":
+                delta_s = -step_s
+            else:
+                raise ValueError(
+                    f"Unknown navigation direction: {direction!r}"
+                )
+
+            old_start = self.current_start_time
+            self.current_start_time = old_start + timedelta(seconds=delta_s)
+
+            try:
+                self.load_current_window(recompute_fx=True)
+
+            except Exception:
+                # Do not leave GUI navigation state pointing at an invalid time.
+                self.current_start_time = old_start
+                raise
+            
+    def apply_user_settings(
+        self,
+        settings: dict,
+        *,
+        emit_signal: bool = True,
+    ) -> None:
+        """Merge GUI settings into session settings."""
+        self.user_settings.update(settings)
+
+        if self.dataset_record is not None:
+            self.selected_channels = self._resolve_selected_channels()
+
+        if emit_signal:
+            self.settings_changed.emit()
+
+    def get_user_settings(self, key: str | None = None):
+        """Return all settings or one settings value."""
+        if key is None:
+            return self.user_settings.copy()
+
+        return self.user_settings.get(key)
+
+    def get_labels_in_current_window(self) -> list[dict]:
+        """Return saved labels whose apex lies in the displayed time window."""
+        if self.label_saver is None:
+            return []
+
+        if (
+            self.loaded_data["time_stamps"] is None
+            or self.loaded_data["t"] is None
+            or self.directory is None
+        ):
+            return []
+
+        start_unix = float(self.loaded_data["time_stamps"][0])
+
+        t_vec = self.loaded_data["t"]
+
+        if len(t_vec) == 0:
+            return []
+
+        end_unix = start_unix + float(t_vec[-1])
+
+        dataset_name = Path(self.directory).name
+
+        df = self.label_saver.df
+
+        if df.empty:
+            return []
+
+        matching = df[
+            (df["apex_time_utc"] >= start_unix)
+            & (df["apex_time_utc"] <= end_unix)
+            & (df["dataset"] == dataset_name)
+        ]
+
+        return [
+            row.to_dict()
+            for _, row in matching.iterrows()
+        ]
+
+    def source_file_time_offset_s(
+        self,
+        apex_time_utc: float,
+    ) -> tuple[Path, float]:
+        """
+        Return the physical source file containing apex_time_utc and the apex
+        offset in seconds from that file's UTC start time.
+
+        This is needed because the displayed T-X time vector is relative to the
+        current displayed window, which may begin partway through a source file.
+        """
+        if not self.dataset_service.is_open:
+            raise RuntimeError("No dataset is open.")
+
+        apex_datetime = datetime.fromtimestamp(
+            float(apex_time_utc),
+            tz=timezone.utc,
+        )
+
+        record = self.dataset_service.find_file(apex_datetime)
+
+        if record is None:
+            raise ValueError(
+                "Could not find indexed source file containing apex time: "
+                f"{apex_datetime.isoformat()}"
+            )
+
+        apex_time_s = (
+            apex_datetime - record.start_time
+        ).total_seconds()
+
+        return record.path, float(apex_time_s)
+
+    def _recompute_fx_for_current_window(self) -> None:
+        """Recompute F-X slices for the currently loaded time window."""
+        if self.loaded_data["amp"] is None:
+            return
+
+        self.fx_manager.update_data()
+        self.spectrogram_manager.update_data()
         
-        return "No timestamp available"
-        
-    def set_h5settings(self, settings_filepath):
-        settings = io.load_settings_preprocessed_h5(settings_filepath)
-        self.h5settings['fs'] = settings['processing_settings']['fs']
-        self.h5settings['dx'] = settings['processing_settings']['dx']
-        self.h5settings['nx'], self.h5settings['ns'] = settings['rehydration_info']['target_shape']
-        self.h5settings['nonzeros_mask'] = settings['rehydration_info']['nonzeros_mask']
-        self.h5settings['file_map'] = settings['file_map']
-
-    def set_cursor_mode(self, mode):
+    def set_cursor_mode(self, mode: str) -> None:
         self.cursor_mode = mode
 
-    def load_and_rehydrate_h5(self, filepath, filter_lowpass=True):
-        fk_dehyd, timestamp = io.load_preprocessed_h5(filepath)
-        amp = 1e9 * io.rehydrate(
-            fk_dehyd,
-            self.h5settings['nonzeros_mask'],
-            (self.h5settings['nx'], self.h5settings['ns'])
-        )
-        if filter_lowpass:
-            amp = self.lowpass_filt(amp, cutoff_hz=70)
-        t = np.arange(0, self.h5settings['ns'], 1) / self.h5settings['fs']
-        x = np.arange(0, self.h5settings['nx'], 1) * self.h5settings['dx']
-        return amp, t, x, timestamp
-    
-    def get_labels_in_current_window(self):
-        """Return TX labels in the current display window as a list of dicts."""
-        if not self.label_saver:
-            return []
 
-        try:
-            display_time_start = float(self.loaded_data['time_stamps'][0])
-            display_time_end = float(self.loaded_data['time_stamps'][-1])+self.h5settings['ns']/self.h5settings['fs']
-            dataset = os.path.basename(self.directory)
-
-            df = self.label_saver.df
-            mask = ((df['apex_time_global'] >= display_time_start) &
-                    (df['apex_time_global'] <= display_time_end) &
-                    (df['dataset'] == dataset))
-            rows = df[mask]
-
-            results = []
-
-
-            for _, row in rows.iterrows():
-                results.append({
-                    "tx_id": int(row["tx_id"]),
-                    "uid": row["uid"],
-                    "apex_time_global": row["apex_time_global"],
-                    "apex_time_local": row["apex_time_local"],
-                    "apex_dist": row["apex_dist"],
-                    "duration": row["duration"],
-                    "distance_to_cable": row["distance_to_cable"],
-                    "dist_max": row["dist_max"],
-                    "dist_min": row["dist_min"],
-                    "f_max": row["f_max"],
-                    "f_min": row["f_min"],
-                })
-            return results
-
-        except Exception as e:
-            print(f"Error querying labels: {e}")
-            return []
-
-    def lowpass_filt(self, data, cutoff_hz=70):
-        """Lowpass filter the data along time axis."""
-        fs = self.h5settings['fs']
-        nyq = 0.5 * fs
-        b, a = sp.butter(10, cutoff_hz / nyq, btype='low', analog=False)
-        filtered_data = sp.filtfilt(b, a, data, axis=1)
-        return filtered_data
-    
 class FXHandle:
-    def __init__(self, data_manager: PreprocessedDataManager):
+    def __init__(self, data_manager: DataManager):
         self.data_manager = data_manager
         self.fx_series_data = None
         self.freq = None
         self.x = None
         self.plot_start_time = None
 
-    def update_data(self):
-        fs = self.data_manager.h5settings['fs']
-        win_s = self.data_manager.get_user_settings('win_s') or 2.0
-        amp = self.data_manager.loaded_data['amp']
-        x = self.data_manager.loaded_data['x']
-        t = self.data_manager.loaded_data['t']
-        win_samples = int(win_s * fs)
+    def update_data(self) -> None:
+        amp = self.data_manager.loaded_data["amp"]
+        x = self.data_manager.loaded_data["x"]
+        t = self.data_manager.loaded_data["t"]
+        fs = self.data_manager.loaded_fs_hz
+
+        if amp is None or x is None or t is None or fs is None:
+            self.fx_series_data = None
+            self.freq = None
+            self.x = None
+            self.plot_start_time = None
+            return
+
+        win_s = float(
+            self.data_manager.get_user_settings("fx_win_s") or 2.0
+        )
+
+        win_samples = int(round(win_s * fs))
+
+        if win_samples < 2:
+            raise ValueError(
+                f"F-X window is too short: {win_s} s at {fs} Hz."
+            )
+
+        requested_nfft = int(
+            self.data_manager.get_user_settings("fx_nfft") or win_samples
+        )
+
+        # Do not truncate the selected F-X time window accidentally.
+        # If requested NFFT is larger, this zero-pads the FFT.
+        fx_nfft = max(win_samples, requested_nfft)
+
+        if amp.shape[1] < win_samples:
+            # Not enough time samples to make one F-X slice.
+            self.fx_series_data = None
+            self.freq = None
+            self.x = x
+            self.plot_start_time = []
+            return
+
         step_samples = win_samples
+        freqs = np.fft.rfftfreq(fx_nfft, d=1.0 / fs)
+
         slices = []
         t_win = []
-        freqs = np.fft.rfftfreq(win_samples, d=1/fs)
-        for start in range(0, amp.shape[1] - win_samples + 1, step_samples):
-            segment = amp[:, start:start+win_samples]
-            t_win.append(t[start])
-            F = np.fft.rfft(segment, axis=1)
-            slices.append(np.abs(F))
-        self.fx_series_data = np.stack(slices, axis=0)
-        self.freq = freqs
-        self.plot_start_time = t_win
-        self.x = x
 
-    def get_dataset(self):
-        return {"amp": self.fx_series_data,
-                "freq": self.freq,
-                "x": self.x,
-                "t": self.plot_start_time}
+        for start in range(
+            0,
+            amp.shape[1] - win_samples + 1,
+            step_samples,
+        ):
+            segment = amp[:, start:start + win_samples]
+
+            t_win.append(float(t[start]))
+
+            # Result shape:
+            # (n_channels, n_frequencies)
+            spectrum = np.fft.rfft(segment, n=fx_nfft, axis=1)
+            spectrum = 2.0 * np.abs(spectrum) / win_samples
+            spectrum[:, 0] *= 0.5 # don't double DC bin
+
+            if fx_nfft % 2 == 0:
+                spectrum[:, -1] *= 0.5 # For even-length windows, don't double Nyquist bin.
+
+            slices.append(spectrum)
+
+        self.fx_series_data = np.stack(slices, axis=0)
+
+        # Final shape:
+        # (n_time_slices, n_channels, n_frequencies)
+        self.freq = freqs
+        self.x = x
+        self.plot_start_time = np.asarray(t_win, dtype=float)
+
+    def get_dataset(self) -> dict:
+        return {
+            "amp": self.fx_series_data,
+            "freq": self.freq,
+            "x": self.x,
+            "t": self.plot_start_time,
+        }
 
 
 class SpectrogramHandle:
-    def __init__(self, data_manager: PreprocessedDataManager):
+    def __init__(self, data_manager: DataManager):
         self.data_manager = data_manager
 
     def update_data(self):
-        pass  # no precomputation needed
-
-    def calc_spectrogram(self, row_idx):
-        nfft = self.data_manager.get_user_settings('nfft') or 256
-        percent_overlap = self.data_manager.get_user_settings('overlap') or 50
-        fs = self.data_manager.h5settings['fs']
-        amp = self.data_manager.loaded_data['amp']
-        sig = amp[row_idx, :]
-        Noverlap = int(nfft * percent_overlap / 100)
-        window = sp.windows.tukey(nfft, .25)
-        window_rms = np.sqrt(np.sum(window**2))
-        freqs, times, Sxx = sp.spectrogram(sig,
-                                           fs=fs,
-                                           window=window,
-                                           nperseg=nfft,
-                                           noverlap=Noverlap,
-                                           scaling='spectrum',
-                                           mode='magnitude')
-        Sxx_corrected = Sxx * nfft / window_rms
-        return freqs, times, Sxx_corrected
-    
-
-class LabelSaver:
-    COLUMNS = [
-        "tx_id", "uid",
-        "apex_time_global", "apex_time_str", "apex_time_local",
-        "apex_dist", "duration", "distance_to_cable",
-        "dist_max", "dist_min", "f_max", "f_min",
-        "label", "label_name", "dataset", "source_file",
-        "saved_timestamp", "username"
-    ]
-
-    def __init__(self, csv_path):
-        self.csv_path = csv_path
-        if os.path.exists(csv_path):
-            self.df = pd.read_csv(csv_path)
-        else:
-            self.df = pd.DataFrame(columns=self.COLUMNS)
-            self._save()
-        # self.conn = sqlite3.connect(csv_path)
-        # self.conn.execute("PRAGMA foreign_keys = ON;")  # enforce FK checks
-        # self.conn.execute("PRAGMA journal_mode = WAL;")
-        # self._create_tables()
-
-    def _save(self):
-        self.df.to_csv(self.csv_path, index=False)
-
-    def _next_tx_id(self):
-        if self.df.empty:
-            return 1
-        else:
-            return self.df['tx_id'].max() + 1
-        
-
-    def save_tx_label(self, uid, apex_time_global, apex_time_str, apex_time_local,
-                       apex_dist, x_m, t_s, dataset, source_file, label, label_name,
-                       distance_to_cable=None, saved_timestamp=None, username=None):
-        """
-        Insert a new whale-call row.
-        x_m / t_s (TX contour points) are used ONLY to derive duration/dist_max/dist_min
-        -- they are not stored raw.
-        Returns tx_id (int) for linking FX min/max updates.
-        """
-        
-        if saved_timestamp is None:
-            saved_timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        if username is None:
-            username = getpass.getuser()
-        if distance_to_cable is None:
-            distance_to_cable = np.nan
-
-        duration = float(np.max(t_s) - np.min(t_s)) if len(t_s) > 0 else np.nan
-        dist_max = float(np.max(x_m)) if len(x_m) > 0 else np.nan
-        dist_min = float(np.min(x_m)) if len(x_m) > 0 else np.nan
-
-        tx_id = self._next_tx_id()
-        new_row = {
-            "tx_id": tx_id,
-            "uid": uid,
-            "apex_time_global": apex_time_global,
-            "apex_time_str": apex_time_str,
-            "apex_time_local": apex_time_local,
-            "apex_dist": apex_dist,
-            "duration": duration,
-            "distance_to_cable": (
-                float(distance_to_cable)
-                if distance_to_cable is not None
-                else None
-            ),
-            "dist_max": dist_max,
-            "dist_min": dist_min,
-            "f_max": np.nan,   # filled in via save_fx_label
-            "f_min": np.nan,
-            "dataset": os.path.basename(dataset),
-            "source_file": os.path.abspath(source_file),
-            "label": label,
-            "label_name": label_name,
-            "saved_timestamp": saved_timestamp,
-            "username": username
-        }
-
-        self.df = pd.concat([self.df, pd.DataFrame([new_row])], ignore_index=True)
-        self._save()
-        return tx_id
-
-    def save_fx_label(self, tx_id, f_min_hz, f_max_hz, **kwargs):
-        """
-        Expand the row's f_min/f_max to cover this FX box.
-        Extra kwargs (x_min_m, x_max_m, t, win_length_s, uid, dataset, label, label_name, ...)
-        are accepted but ignored -- kept for call-site compatibility.
-        """
-        idx = self.df.index[self.df["tx_id"] == tx_id]
-        if len(idx) == 0:
-            print(f"Warning: no TX row found for tx_id={tx_id}")
-            return
-        idx = idx[0]
-
-        current_min = self.df.at[idx, "f_min"]
-        current_max = self.df.at[idx, "f_max"]
-
-        new_min = f_min_hz if pd.isna(current_min) else min(current_min, f_min_hz)
-        new_max = f_max_hz if pd.isna(current_max) else max(current_max, f_max_hz)
-
-        self.df.at[idx, "f_min"] = new_min
-        self.df.at[idx, "f_max"] = new_max
-        self._save()
-
-    def remove_label_by_id(self, tx_id):
-        """Delete the row by tx_id."""
-        print("Deleting TX label ID:", tx_id)
-        self.df = self.df[self.df["tx_id"] != tx_id].reset_index(drop=True)
-        self._save()
-
-    def close(self):
-        """No-op, kept for interface compatibility with old SQLite version."""
         pass
+
+    def calc_spectrogram(self, row_idx: int):
+        nfft = int(
+            self.data_manager.get_user_settings("spec_nfft") or 256
+        )
+
+        percent_overlap = float(
+            self.data_manager.get_user_settings("spec_overlap") or 50
+        )
+
+        fs = self.data_manager.loaded_fs_hz
+        amp = self.data_manager.loaded_data["amp"]
+
+        if amp is None or fs is None:
+            raise RuntimeError("No data are loaded.")
+
+        if not (0 <= row_idx < amp.shape[0]):
+            raise IndexError(
+                f"row_idx={row_idx} is outside valid range "
+                f"[0, {amp.shape[0] - 1}]"
+            )
+
+        sig = amp[row_idx, :]
+
+        # scipy.signal.spectrogram requires nperseg <= signal length.
+        nfft = min(nfft, len(sig))
+
+        if nfft < 2:
+            raise ValueError(
+                "Loaded signal is too short to calculate a spectrogram."
+            )
+
+        noverlap = int(nfft * percent_overlap / 100)
+        noverlap = min(noverlap, nfft - 1)
+
+        window = sp.windows.tukey(nfft, alpha=0.25)
+        window_rms = np.sqrt(np.sum(window ** 2))
+
+        freqs, times, sxx = sp.spectrogram(
+            sig,
+            fs=fs,
+            window=window,
+            nperseg=nfft,
+            noverlap=noverlap,
+            scaling="spectrum",
+            mode="magnitude",
+        )
+
+        sxx_corrected = sxx * nfft / window_rms
+
+        return freqs, times, sxx_corrected

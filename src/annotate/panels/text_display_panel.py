@@ -14,7 +14,7 @@ class TextDisplayPanel(QWidget):
         
         self.timestamp_label = QLabel("Start Time: --")
         self.timestamp_label.setStyleSheet("font-size: 12px; color: black;")
-        
+       
         # Add some spacing
         separator = QLabel("─" * 20)
         separator.setStyleSheet("color: gray;")
@@ -23,16 +23,15 @@ class TextDisplayPanel(QWidget):
         self.cursor_mode_label = QLabel("Cursor Mode: Normal")
         self.cursor_mode_label.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
 
-        # Annotation workflow prompt
-        self.annotation_prompt_label = QLabel("No annotation in progress.")
-        self.annotation_prompt_label.setWordWrap(True)
-        self.annotation_prompt_label.setStyleSheet(
-            "font-weight: bold; font-size: 12px; color: #0033cc; "
-            "background-color: #f4f7ff; "
-            "border: 1px solid #c8d5f0; "
-            "padding: 6px;"
-        )
+        # Add some spacing
+        separator = QLabel("─" * 20)
+        separator.setStyleSheet("color: gray;")
 
+        # Add metadata label for dataset information
+        self.metadata_label = QLabel("Dataset metadata: --")
+        self.metadata_label.setWordWrap(True)
+        self.metadata_label.setStyleSheet("font-size: 11px; color: black;")
+        layout.addWidget(self.metadata_label)
 
         # Layout order
         layout.addWidget(self.filename_label)
@@ -59,7 +58,23 @@ class TextDisplayPanel(QWidget):
     def update_info_text(self, info_text):
         """Change the content of the info label."""
         self.info_label.setText(info_text)
+        
+    def update_dataset_metadata(self, record) -> None:
+        """
+        Display source metadata from DatasetService.FileRecord.
+        """
+        metadata = record.metadata
 
-    def set_annotation_prompt(self, text):
-        """Show the current annotation instruction beside the spectrogram."""
-        self.annotation_prompt_label.setText(text)
+        gauge_length = metadata.get("gauge_length_m", "unknown")
+
+        self.metadata_label.setText(
+            "<b>Dataset metadata</b><br>"
+            f"Interrogator: {record.interrogator}<br>"
+            f"Sampling rate: {record.fs_hz:g} Hz<br>"
+            f"Channel spacing: {record.dx_m:.3f} m<br>"
+            f"Cable range: {metadata['start_distance_m']:.1f} – "
+            f"{metadata['end_distance_m']:.1f} m<br>"
+            f"Samples/file: {record.n_samples}<br>"
+            f"Channels/file: {record.n_channels}<br>"
+            f"Gauge length: {gauge_length} m"
+        )
