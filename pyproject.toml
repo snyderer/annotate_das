@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "GUI for plotting preprocessed DAS data, identifying potential signals of interest, and assigning labels"
 authors = [
     { name = "Dr. Eric R. Snyder", email = "esnyder@cornell.edu" }
+    { name = "Yin-Tse (Alex) Lin, email = "ylin0625@umd.edu"}
 ]
 dependencies = [
     "PyQt6",
