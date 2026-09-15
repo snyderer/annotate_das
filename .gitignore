@@ -1,6 +1,8 @@
 # Python bytecode / cache files
 __pycache__/
 *.py[cod]
+build/
+dist/
 
 # editable install files (e.g. pip install -e .)
 *.egg-info/
