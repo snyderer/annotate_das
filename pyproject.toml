@@ -1,15 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "annotate"
 version = "0.1.0"
 description = "GUI for plotting preprocessed DAS data, identifying potential signals of interest, and assigning labels"
 authors = [
-    {name="Dr. Eric R. Snyder", email="esnyder@cornell.edu"}
+    { name = "Dr. Eric R. Snyder", email = "esnyder@cornell.edu" }
+    { name = "Yin-Tse (Alex) Lin, email = "ylin0625@umd.edu"}
 ]
 dependencies = [
     "PyQt6",
     "pandas",
     "pyqtgraph",
+    "matplotlib",
+    "das4whales"
 ]
 
 [project.scripts]
 annotate = "annotate.main:run"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
