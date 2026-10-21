@@ -41,6 +41,8 @@ class FXPlotPanel(QWidget):
         self.fx_slice_rois: list[pg.RectROI] = []
 
         self.distance_arrow = None  
+        
+        self.frequency_annotation_box = None # Frequency box (non-editable) for annotation display.
 
         self.distance_min_line = None
         self.distance_max_line = None
@@ -90,6 +92,33 @@ class FXPlotPanel(QWidget):
 
         self.show_slice(0)
 
+    def reset_view_to_data_extent(self) -> None:
+        """Show the complete frequency and cable-distance extent of F-X data."""
+        dataset = self.data_manager.fx_manager.get_dataset()
+
+        freq = dataset.get("freq")
+        distance_m = dataset.get("x")
+
+        if (
+            freq is None
+            or distance_m is None
+            or len(freq) == 0
+            or len(distance_m) == 0
+        ):
+            return
+
+        f_min = float(np.min(freq))
+        f_max = float(np.max(freq))
+
+        x_min = float(np.min(distance_m))
+        x_max = float(np.max(distance_m))
+
+        self.plot_widget.getPlotItem().vb.setRange(
+            xRange=(f_min, f_max),
+            yRange=(x_min, x_max),
+            padding=0.02,
+        )
+
     def on_settings_changed(self) -> None:
         """Update contrast settings and redraw current F-X slice."""
         self.update_settings()
@@ -133,6 +162,7 @@ class FXPlotPanel(QWidget):
         if not (0 <= slice_idx < amp.shape[0]):
             return
 
+        self.clear_frequency_annotation_box()
         self.current_slice_idx = int(slice_idx)
         self.data_manager.current_fx_index = self.current_slice_idx
 
@@ -621,11 +651,72 @@ class FXPlotPanel(QWidget):
         )
 
         self.plot_widget.addItem(self.distance_arrow)
+        
+    def clear_frequency_annotation_box(self) -> None:
+        """Remove the non-editable aggregate frequency annotation guide box."""
+        if self.frequency_annotation_box is not None:
+            try:
+                self.plot_widget.removeItem(
+                    self.frequency_annotation_box
+                )
+            except Exception:
+                pass
+
+        self.frequency_annotation_box = None
+
+    def set_frequency_annotation_box(
+        self,
+        *,
+        f_min_hz: float,
+        f_max_hz: float,
+        x_min_m: float,
+        x_max_m: float,
+    ) -> None:
+        """
+        Draw a non-editable box showing aggregate frequency/distance bounds.
+
+        This is intentionally separate from editable F-X ROI boxes.
+        """
+        self.clear_frequency_annotation_box()
+
+        f_min_hz = float(f_min_hz)
+        f_max_hz = float(f_max_hz)
+        x_min_m = float(x_min_m)
+        x_max_m = float(x_max_m)
+
+        if f_max_hz <= f_min_hz or x_max_m <= x_min_m:
+            return
+
+        self.frequency_annotation_box = pg.RectROI(
+            [f_min_hz, x_min_m],
+            [
+                f_max_hz - f_min_hz,
+                x_max_m - x_min_m,
+            ],
+            pen=pg.mkPen(
+                color="cyan",
+                width=3,
+                style=Qt.PenStyle.DashLine,
+            ),
+            movable=False,
+            resizable=False,
+        )
+
+        # Do not let this guide box intercept mouse events intended for the
+        # plot or editable ROI logic.
+        self.frequency_annotation_box.setAcceptedMouseButtons(
+            Qt.MouseButton.NoButton
+        )
+
+        self.plot_widget.addItem(
+            self.frequency_annotation_box
+        )
 
     def clear_annotation_overlays(self) -> None:
         """Remove visible F-X annotation graphics."""
         self._clear_displayed_rois()
         self.clear_distance_boundaries()
+        self.clear_frequency_annotation_box()
 
         if self.distance_arrow is not None:
             try:

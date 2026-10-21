@@ -13,9 +13,16 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QLabel,
     QFileDialog,
+    QDoubleSpinBox,
 )
 from html import escape
-from annotate.config import DEFAULT_LABEL_MAPPING, DEFAULT_SAVE_PATH
+import math
+from annotate.config import (
+    DEFAULT_LABEL_MAPPING,
+    DEFAULT_SAVE_PATH,
+    LABEL_DEFINITIONS,
+    SOUND_SPEED_MPS,
+)
 
 
 class AnnotationPanel(QWidget):
@@ -28,6 +35,7 @@ class AnnotationPanel(QWidget):
 
     confirm_label_requested = pyqtSignal(int)
     distance_to_cable_changed = pyqtSignal(float)
+    sound_speed_changed = pyqtSignal(float)
     toggle_existing_labels_requested = pyqtSignal(bool)
     
     DISTANCE_TO_CABLE_MIN_M = 0
@@ -48,11 +56,12 @@ class AnnotationPanel(QWidget):
 
         self.workflow_label.setText(
             "<b>Annotation workflow</b><br>"
-            "<u>A</u>: select / confirm apex<br>"
-            "<u>H</u>: fit / confirm distance to cable<br>"
-            "<u>E</u>: select / confirm endpoint<br>"
-            "<u>D</u>: select / confirm distance range<br>"
+            "<u>A</u>: place / edit apex<br>"
+            "<u>H</u>: fit hyperbola<br>"
+            "<u>E</u>: place / edit endpoint<br>"
+            "<u>D</u>: select distance range<br>"
             "<u>F</u>: edit / finish F-X boxes<br>"
+            "<u>Enter</u>: save pasted or edited annotation<br>"
             "<u>Esc</u>: cancel annotation"
         )
 
@@ -63,17 +72,16 @@ class AnnotationPanel(QWidget):
         # ----------------------------------------------------------
         self.label_dropdown = QComboBox()
 
-        for label_number in sorted(DEFAULT_LABEL_MAPPING):
+        for label_number in sorted(LABEL_DEFINITIONS):
             if label_number == 0:
                 continue
 
-            label_name = DEFAULT_LABEL_MAPPING[label_number]
+            definition = LABEL_DEFINITIONS[label_number]
 
             self.label_dropdown.addItem(
-                f"{label_number}: {label_name}",
+                f"{label_number}: {definition.name} [{definition.code}]",
                 userData=label_number,
             )
-
         layout.addRow("Selected label", self.label_dropdown)
 
         # Show all possible key labels simultaneously.
@@ -144,6 +152,25 @@ class AnnotationPanel(QWidget):
         layout.addRow("Distance range (m)", distance_range_layout)
 
         # ----------------------------------------------------------
+        # Sound speed
+        # ----------------------------------------------------------
+        self.sound_speed_spinbox = QDoubleSpinBox()
+        self.sound_speed_spinbox.setRange(1_000.0, 2_000.0)
+        self.sound_speed_spinbox.setDecimals(1)
+        self.sound_speed_spinbox.setSingleStep(1.0)
+        self.sound_speed_spinbox.setSuffix(" m/s")
+        self.sound_speed_spinbox.setValue(float(SOUND_SPEED_MPS))
+
+        self.sound_speed_spinbox.valueChanged.connect(
+            self.sound_speed_changed.emit
+        )
+
+        layout.addRow(
+            "Sound speed",
+            self.sound_speed_spinbox,
+        )
+
+        # ----------------------------------------------------------
         # Frequency range
         # ----------------------------------------------------------
         frequency_range_layout = QHBoxLayout()
@@ -173,6 +200,7 @@ class AnnotationPanel(QWidget):
         # ----------------------------------------------------------
         self.toggle_labels_button = QPushButton("Show Existing Labels")
         self.toggle_labels_button.setCheckable(True)
+        self.toggle_labels_button.setChecked(True)
         self.toggle_labels_button.toggled.connect(
             self.toggle_existing_labels_requested.emit
         )
@@ -186,6 +214,8 @@ class AnnotationPanel(QWidget):
         self.confirm_save_button.clicked.connect(
             self._emit_confirm_label
         )
+        
+        self.confirm_save_button.setVisible(False)
 
         layout.addRow("Confirm and Save", self.confirm_save_button)
 
@@ -201,19 +231,44 @@ class AnnotationPanel(QWidget):
         if filepath:
             self.labels_path_edit.setText(filepath)
 
+    def set_settings(self, settings: dict) -> None:
+            labels_path = settings.get("labels_file_path")
+
+            if labels_path:
+                self.labels_path_edit.setText(str(labels_path))
+
+            sound_speed_mps = settings.get("sound_speed_mps")
+
+            if sound_speed_mps is None:
+                return
+
+            try:
+                sound_speed_mps = float(sound_speed_mps)
+            except (TypeError, ValueError):
+                return
+
+            if not math.isfinite(sound_speed_mps):
+                return
+
+            self.sound_speed_spinbox.setValue(sound_speed_mps)
+                
     def get_settings(self) -> dict:
-        """
-        Return only settings that should become part of DataManager state.
-        Annotation preview fields are not settings and are intentionally
-        excluded.
-        """
-        return {
-            "labels_file_path": self.labels_path_edit.text().strip(),
+            """
+            Return only settings that should become part of DataManager state.
+            Annotation preview fields are not settings and are intentionally
+            excluded.
+            """
+            return {
+                "labels_file_path": self.labels_path_edit.text().strip(),
 
-            # Fixed mapping from config, not user-editable.
-            "label_mapping": DEFAULT_LABEL_MAPPING.copy(),
-        }
+                "sound_speed_mps": float(
+                    self.sound_speed_spinbox.value()
+                ),
 
+                # Fixed mapping from config, not user-editable.
+                "label_mapping": DEFAULT_LABEL_MAPPING.copy(),
+            }
+    
     def set_distance_to_cable_enabled(self, enabled: bool) -> None:
         self.distance_to_cable_slider.setEnabled(enabled)
 
@@ -315,26 +370,25 @@ class AnnotationPanel(QWidget):
         ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " UTC"
 
     def _build_label_legend(self) -> str:
-        """
-        Render keyboard label shortcuts.
-
-        Number keys 1–9 assign labels. Key 0 is reserved and does not create
-        a new annotation.
-        """
+        """Render label keyboard shortcuts and stable label codes."""
         rows = []
 
-        for number in sorted(DEFAULT_LABEL_MAPPING):
+        for number in sorted(LABEL_DEFINITIONS):
             if number == 0:
                 continue
 
-            name = DEFAULT_LABEL_MAPPING[number]
-            safe_name = escape(name or "(unassigned)")
+            definition = LABEL_DEFINITIONS[number]
+
+            safe_name = escape(definition.name)
+            safe_code = escape(definition.code)
 
             rows.append(
-                f"<b><u>{number}</u></b>: {safe_name}"
+                f"<b><u>{number}</u></b>: "
+                f"{safe_name} "
+                f"<span style='color: #666;'>[{safe_code}]</span>"
             )
 
-        rows.append("<b><u>0</u></b>: cancel / reserved")
+        rows.append("<b><u>0</u></b>: reserved / cancel")
 
         return "<br>".join(rows)
 

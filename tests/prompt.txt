@@ -1,0 +1,33 @@
+I have a large python codebase I was developing to make a GUI to annotate DAS data. I was working on it with GPT in another chat, but the chat got so long it is now crashing. The GUI loads DAS data using DAS4Whales, plots it, and has an annotation set-up that allows users to label whale calls in the dataset. It is structured like this:
+
+/annotate_das/src/annotate/
+-data/
+--dataset_reader.py
+--dataset_service.py
+--file_index.py
+--processing.py
+-panels/
+--init.py
+--annotation_panel.py
+--control_panel.py
+--data_source_panel.py
+--display_settings_panel.py
+--fx_plot_panel.py
+--fx_series_panel.py
+--navigation_panel.py
+--processing_panel.py
+--spectrogram_panel.py
+--text_display_panel.py
+--tx_plot_panel.py
+-init.py
+-config.py
+-data_manager.py
+-dataset_profiles.py
+-label_saver.py
+-main_window.py
+-main.py
+-models.py
+
+NEXT TO-DO:
+
+incorporate cable geometry into hyperbola calculation.

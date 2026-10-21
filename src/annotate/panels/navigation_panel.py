@@ -1,9 +1,8 @@
-# annotate/panels/navigation_panel.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from PyQt6.QtCore import QDate, QTime, QDateTime, Qt
+from PyQt6.QtCore import QDate, QTime, QDateTime, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget,
     QFormLayout,
@@ -19,6 +18,10 @@ from annotate.config import UserSettings
 class NavigationPanel(QWidget):
     """Controls for absolute-time DAS navigation."""
 
+    start_time_requested = pyqtSignal(object)
+    duration_requested = pyqtSignal(float)
+    navigation_step_changed = pyqtSignal(float)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -26,7 +29,9 @@ class NavigationPanel(QWidget):
         layout = QFormLayout(self)
 
         self.start_time_edit = QDateTimeEdit()
-        self.start_time_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss.zzz")
+        self.start_time_edit.setDisplayFormat(
+            "yyyy-MM-dd HH:mm:ss.zzz"
+        )
         self.start_time_edit.setCalendarPopup(True)
         self.start_time_edit.setTimeSpec(Qt.TimeSpec.UTC)
 
@@ -54,13 +59,47 @@ class NavigationPanel(QWidget):
         layout.addRow("Navigation step", self.step_spin)
         layout.addRow(button_layout)
 
-        self.step_spin.valueChanged.connect(self._update_button_labels)
+        # Update the button labels when the step changes.
+        self.step_spin.valueChanged.connect(
+            self._update_button_labels
+        )
         self._update_button_labels()
+
+        # Commit navigation changes when the user presses Enter or moves
+        # focus away from the respective control.
+        self.start_time_edit.editingFinished.connect(
+            self._emit_start_time_requested
+        )
+        self.duration_spin.editingFinished.connect(
+            self._emit_duration_requested
+        )
+        self.step_spin.editingFinished.connect(
+            self._emit_navigation_step_changed
+        )
 
     def _update_button_labels(self) -> None:
         step_s = self.step_spin.value()
+
         self.btn_back.setText(f"< {step_s:g}s")
         self.btn_forward.setText(f"> {step_s:g}s")
+
+    def _emit_start_time_requested(self) -> None:
+        """Emit the edited UTC start time after Enter/focus loss."""
+        self.start_time_requested.emit(
+            self.selected_start_time()
+        )
+
+    def _emit_duration_requested(self) -> None:
+        """Emit requested plot duration after Enter/focus loss."""
+        self.duration_requested.emit(
+            float(self.duration_spin.value())
+        )
+
+    def _emit_navigation_step_changed(self) -> None:
+        """Store the navigation step immediately after Enter/focus loss."""
+        self.navigation_step_changed.emit(
+            float(self.step_spin.value())
+        )
 
     def get_settings(self) -> dict:
         return {
@@ -83,8 +122,19 @@ class NavigationPanel(QWidget):
             tzinfo=timezone.utc,
         )
 
+    def set_settings(self, settings: dict) -> None:
+        if "duration_s" in settings:
+            self.duration_spin.setValue(
+                float(settings["duration_s"])
+            )
+
+        if "navigation_step_s" in settings:
+            self.step_spin.setValue(
+                float(settings["navigation_step_s"])
+            )
+
     def set_start_time(self, value: datetime) -> None:
-        """Update the displayed navigation time from a UTC datetime."""
+        """Update displayed navigation time from a UTC datetime."""
         if value.tzinfo is None:
             raise ValueError("start time must be timezone-aware")
 

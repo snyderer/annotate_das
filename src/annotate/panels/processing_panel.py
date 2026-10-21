@@ -161,3 +161,67 @@ class ProcessingPanel(QWidget):
 
             "max_display_freq_hz": self.max_frequency_spin.value(),
         }
+        
+    def set_settings(self, settings: dict) -> None:
+        self.boundary_correction_check.setChecked(
+            bool(
+                settings.get(
+                    "file_boundary_correction_enabled",
+                    self.boundary_correction_check.isChecked(),
+                )
+            )
+        )
+
+        if "file_boundary_edge_duration_s" in settings:
+            self.boundary_edge_spin.setValue(
+                float(settings["file_boundary_edge_duration_s"])
+            )
+
+        self.bandpass_check.setChecked(
+            bool(
+                settings.get(
+                    "bandpass_enabled",
+                    self.bandpass_check.isChecked(),
+                )
+            )
+        )
+
+        preset = settings.get("bandpass_preset")
+
+        if preset is not None:
+            index = self.bandpass_preset_combo.findText(str(preset))
+
+            if index >= 0:
+                self.bandpass_preset_combo.setCurrentIndex(index)
+
+        if "f_lo_hz" in settings:
+            self.f_lo_spin.setValue(float(settings["f_lo_hz"]))
+
+        if "f_hi_hz" in settings:
+            self.f_hi_spin.setValue(float(settings["f_hi_hz"]))
+
+        self.fk_filter_check.setChecked(
+            bool(
+                settings.get(
+                    "fk_filter_enabled",
+                    self.fk_filter_check.isChecked(),
+                )
+            )
+        )
+
+        if "c_min_mps" in settings:
+            self.c_min_spin.setValue(
+                float(settings["c_min_mps"])
+            )
+
+        if "c_max_mps" in settings:
+            self.c_max_spin.setValue(
+                float(settings["c_max_mps"])
+            )
+
+        if "max_display_freq_hz" in settings:
+            self.max_frequency_spin.setValue(
+                float(settings["max_display_freq_hz"])
+            )
+
+        self._update_enabled_state()

@@ -19,21 +19,31 @@ class LabelSaver:
     COLUMNS = [
         "tx_id",
         "uid",
+
+        "dataset_key",
+
         "apex_time_utc",
         "apex_time_str",
         "apex_time_s",
         "sound_speed_mps",
+
         "apex_dist",
         "duration",
         "distance_to_cable",
+
         "dist_max",
         "dist_min",
+
         "f_max",
         "f_min",
+
         "label",
         "label_name",
+        "label_code",
+
         "dataset",
         "source_file",
+
         "saved_timestamp",
         "username",
     ]
@@ -48,7 +58,13 @@ class LabelSaver:
 
         if os.path.exists(self.csv_path):
             self.df = pd.read_csv(self.csv_path)
+            
+            if "dataset_key" not in self.df.columns:
+                self.df["dataset_key"] = ""
 
+            if "label_code" not in self.df.columns:
+                self.df["label_code"] = ""
+                
             # Add any fields missing from older CSV versions.
             for column in self.COLUMNS:
                 if column not in self.df.columns:
@@ -84,9 +100,11 @@ class LabelSaver:
         self,
         *,
         uid: str,
+        dataset_key: str,
         apex_time_utc: float,
         apex_time_str: str,
         apex_time_s: float,
+        sound_speed_mps: float,
         apex_dist: float,
         x_m: list[float],
         t_s: list[float],
@@ -94,8 +112,10 @@ class LabelSaver:
         source_file: str,
         label: int,
         label_name: str,
+        label_code: str,
         distance_to_cable: float | None = None,
-        sound_speed_mps: float | None = None,
+        f_min: float | None = None,
+        f_max: float | None = None,
         saved_timestamp: str | None = None,
         username: str | None = None,
     ) -> int:
@@ -132,27 +152,45 @@ class LabelSaver:
         row = {
             "tx_id": tx_id,
             "uid": str(uid),
+
+            "dataset_key": str(dataset_key),
+
             "apex_time_utc": float(apex_time_utc),
             "apex_time_str": str(apex_time_str),
-            "apex_time_s": float(apex_time_utc),
-            "apex_dist": float(apex_dist),
+            "apex_time_s": float(apex_time_s),
             "sound_speed_mps": float(sound_speed_mps),
+
+            "apex_dist": float(apex_dist),
             "duration": duration,
             "distance_to_cable": (
                 float(distance_to_cable)
                 if distance_to_cable is not None
                 else np.nan
             ),
+
             "dist_max": dist_max,
             "dist_min": dist_min,
-            "f_max": np.nan,
-            "f_min": np.nan,
+
+            "f_max": (
+                float(f_max)
+                if f_max is not None and np.isfinite(float(f_max))
+                else np.nan
+            ),
+            "f_min": (
+                float(f_min)
+                if f_min is not None and np.isfinite(float(f_min))
+                else np.nan
+            ),
+
             "label": int(label),
             "label_name": str(label_name),
+            "label_code": str(label_code),
+
             "dataset": Path(dataset).name,
             "source_file": str(
                 Path(source_file).expanduser().resolve()
             ),
+
             "saved_timestamp": saved_timestamp,
             "username": username,
         }
@@ -223,6 +261,112 @@ class LabelSaver:
         )
 
         self._save()
+
+    def update_tx_label(
+        self,
+        *,
+        tx_id: int,
+        dataset_key: str,
+        apex_time_utc: float,
+        apex_time_str: str,
+        apex_time_s: float,
+        sound_speed_mps: float,
+        apex_dist: float,
+        x_m: list[float],
+        t_s: list[float],
+        dataset: str,
+        source_file: str,
+        label: int,
+        label_name: str,
+        label_code: str,
+        distance_to_cable: float | None = None,
+        f_min: float | None = None,
+        f_max: float | None = None,
+    ) -> int:
+        """
+        Update one existing T-X annotation row in place.
+
+        The annotation keeps its original tx_id and uid. This is used when
+        an annotator edits an already-saved label.
+        """
+        matching_rows = self.df.index[
+            pd.to_numeric(
+                self.df["tx_id"],
+                errors="coerce",
+            ) == int(tx_id)
+        ]
+
+        if len(matching_rows) == 0:
+            raise KeyError(
+                f"No saved annotation found for tx_id={tx_id}."
+            )
+
+        row_index = matching_rows[0]
+
+        x_m = list(x_m or [])
+        t_s = list(t_s or [])
+
+        duration = (
+            float(np.max(t_s) - np.min(t_s))
+            if t_s
+            else np.nan
+        )
+
+        dist_min = float(np.min(x_m)) if x_m else np.nan
+        dist_max = float(np.max(x_m)) if x_m else np.nan
+
+        updated_values = {
+            "dataset_key": str(dataset_key),
+
+            "apex_time_utc": float(apex_time_utc),
+            "apex_time_str": str(apex_time_str),
+            "apex_time_s": float(apex_time_s),
+            "sound_speed_mps": float(sound_speed_mps),
+
+            "apex_dist": float(apex_dist),
+            "duration": duration,
+            "distance_to_cable": (
+                float(distance_to_cable)
+                if distance_to_cable is not None
+                else np.nan
+            ),
+
+            "dist_min": dist_min,
+            "dist_max": dist_max,
+
+            "f_min": (
+                float(f_min)
+                if f_min is not None
+                else np.nan
+            ),
+            "f_max": (
+                float(f_max)
+                if f_max is not None
+                else np.nan
+            ),
+
+            "label": int(label),
+            "label_name": str(label_name),
+            "label_code": str(label_code),
+
+            "dataset": Path(dataset).name,
+            "source_file": str(
+                Path(source_file).expanduser().resolve()
+            ),
+
+            "saved_timestamp": (
+                pd.Timestamp.utcnow()
+                .strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            ),
+            "username": getpass.getuser(),
+        }
+
+        for column, value in updated_values.items():
+            self.df.at[row_index, column] = value
+
+        self._save()
+
+        return int(tx_id)
 
     def remove_label_by_id(self, tx_id: int) -> None:
         """Delete one annotation row permanently."""

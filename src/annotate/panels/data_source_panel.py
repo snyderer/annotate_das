@@ -103,6 +103,40 @@ class DataSourcePanel(QWidget):
             "target_dx_m": self.channel_spacing_spin.value(),
         }
 
+    def set_settings(self, settings: dict) -> None:
+        interrogator = settings.get("interrogator")
+
+        if interrogator is not None:
+            self.set_interrogator(interrogator)
+
+        self.use_full_cable_check.setChecked(
+            bool(
+                settings.get(
+                    "use_full_cable_length",
+                    self.use_full_cable_check.isChecked(),
+                )
+            )
+        )
+
+        if "cable_start_m" in settings:
+            self.start_distance_spin.setValue(
+                float(settings["cable_start_m"]) / 1000.0
+            )
+
+        if "cable_end_m" in settings:
+            self.end_distance_spin.setValue(
+                float(settings["cable_end_m"]) / 1000.0
+            )
+
+        if settings.get("target_dx_m") is not None:
+            self.channel_spacing_spin.setValue(
+                float(settings["target_dx_m"])
+            )
+
+        self._update_distance_controls(
+            self.use_full_cable_check.isChecked()
+        )
+        
     def set_cable_metadata(
         self,
         *,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 
-from PyQt6.QtCore import QRectF, pyqtSignal
+from PyQt6.QtCore import QEvent, QRectF, pyqtSignal
 from PyQt6.QtWidgets import (
     QScrollArea,
     QVBoxLayout,
@@ -34,6 +34,7 @@ class FXSeriesPanel(QWidget):
 
     # Border styles used during F-X annotation.
     BORDER_NONE = ""
+    BORDER_SELECTED = "border: 3px solid dodgerblue;"
     BORDER_SELECTED_EMPTY = "border: 3px solid red;"
     BORDER_SELECTED_BOXED = "border: 3px solid limegreen;"
     BORDER_RELEVANT_EMPTY = "border: 2px solid orange;"
@@ -57,10 +58,6 @@ class FXSeriesPanel(QWidget):
 
         # F-X slice indices relevant to the current annotation.
         self.annotation_slice_indices: set[int] = set()
-
-        # F-X thumbnail indices that overlap the currently annotated call.
-        # Empty unless F-X box annotation mode is active.
-        self.annotation_slice_indices = set()
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -122,6 +119,13 @@ class FXSeriesPanel(QWidget):
         distance_m = dataset["x"]
         times = dataset["t"]
 
+        # store currently selected thumbnail index to restore after rebuilding thumbnails
+        selected_idx = getattr(
+            self.data_manager,
+            "current_fx_index",
+            0,
+        )
+        
         if (
             amp is None
             or freq is None
@@ -158,6 +162,14 @@ class FXSeriesPanel(QWidget):
             plot_widget = pg.PlotWidget()
             plot_widget.setBackground("w")
             plot_widget.setMinimumHeight(180)
+            plot_widget.getPlotItem().setMouseEnabled(
+                x=False,
+                y=False,
+            )
+            
+            # Wheel input over a thumbnail scrolls the F-X series instead of
+            # zooming the thumbnail plot.
+            plot_widget.viewport().installEventFilter(self)
 
             plot_item = plot_widget.getPlotItem()
             plot_item.setLabel("bottom", "frequency", units="Hz")
@@ -199,7 +211,48 @@ class FXSeriesPanel(QWidget):
             self.plot_widgets.append(plot_widget)
             self.plot_img_items.append(img_item)
 
+        if self.plot_widgets:
+            if 0 <= selected_idx < len(self.plot_widgets):
+                self.highlight_idx = int(selected_idx)
+            else:
+                self.highlight_idx = 0
+
         self._refresh_thumbnail_borders()
+
+    def eventFilter(self, watched, event) -> bool:
+        """
+        Redirect mouse-wheel input over an F-X thumbnail to the series
+        scrollbar instead of allowing pyqtgraph to zoom that thumbnail.
+        """
+        if event.type() == QEvent.Type.Wheel:
+            scrollbar = self.scroll_area.verticalScrollBar()
+
+            pixel_delta_y = event.pixelDelta().y()
+            angle_delta_y = event.angleDelta().y()
+
+            if pixel_delta_y:
+                # Touchpad-style scrolling.
+                scrollbar.setValue(
+                    scrollbar.value() - pixel_delta_y
+                )
+
+            elif angle_delta_y:
+                # Typical mouse wheels report +/-120 per notch.
+                wheel_steps = angle_delta_y / 120.0
+
+                scrollbar.setValue(
+                    scrollbar.value()
+                    - round(
+                        wheel_steps
+                        * scrollbar.singleStep()
+                        * 3
+                    )
+                )
+
+            event.accept()
+            return True
+
+        return super().eventFilter(watched, event)
 
     def _clear_thumbnails(self) -> None:
         """Delete all existing thumbnail widgets."""
@@ -273,13 +326,19 @@ class FXSeriesPanel(QWidget):
             is_relevant = slice_idx in self.annotation_slice_indices
 
             if is_selected and is_relevant:
+                # F-X annotation mode: selected relevant window.
                 style = (
                     self.BORDER_SELECTED_BOXED
                     if has_boxes
                     else self.BORDER_SELECTED_EMPTY
                 )
 
+            elif is_selected:
+                # Normal browsing mode: currently displayed F-X slice.
+                style = self.BORDER_SELECTED
+
             elif is_relevant:
+                # Other windows relevant to the active call annotation.
                 style = (
                     self.BORDER_RELEVANT_BOXED
                     if has_boxes

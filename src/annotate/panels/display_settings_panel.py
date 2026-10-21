@@ -116,8 +116,6 @@ class DisplaySettingsPanel(QWidget):
         self.spec_vmax_slider.valueChanged.connect(
             self.display_settings_changed.emit
         )
-        
-        display_settings_changed = pyqtSignal()
 
     def _label(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -149,3 +147,103 @@ class DisplaySettingsPanel(QWidget):
             "tx_vmin": self.tx_vmin_slider.value(),
             "tx_vmax": self.tx_vmax_slider.value(),
         }
+            
+    def set_settings(self, settings: dict) -> None:
+        """
+        Populate display widgets from profile/session settings.
+
+        Missing settings intentionally leave the current widget values unchanged.
+        Since widgets are initialized from UserSettings(), omitted profile values
+        naturally fall back to config.py defaults.
+        """
+        self.blockSignals(True)
+
+        widgets = (
+            self.tx_vmin_slider,
+            self.tx_vmax_slider,
+            self.fx_vmin_slider,
+            self.fx_vmax_slider,
+            self.spec_vmin_slider,
+            self.spec_vmax_slider,
+            self.fx_win_s_spin,
+            self.fx_nfft_spin,
+            self.spec_nfft_spin,
+            self.spec_overlap_spin,
+        )
+
+        for widget in widgets:
+            widget.blockSignals(True)
+
+        try:
+            def set_level_slider(slider: QSlider, key: str) -> None:
+                """
+                Set a 0--100 display slider.
+
+                Supported input forms:
+                    normalized profile/config value:
+                        0.4 -> slider value 40
+
+                    current GUI/session slider value:
+                        40 -> slider value 40
+                """
+                value = settings.get(key)
+
+                if value is None:
+                    return
+
+                value = float(value)
+
+                if 0.0 <= value <= 1.0:
+                    slider_value = int(round(value * 100.0))
+                else:
+                    slider_value = int(round(value))
+
+                slider.setValue(
+                    max(
+                        slider.minimum(),
+                        min(slider_value, slider.maximum()),
+                    )
+                )
+
+            # T-X display levels.
+            set_level_slider(self.tx_vmin_slider, "tx_vmin")
+            set_level_slider(self.tx_vmax_slider, "tx_vmax")
+
+            # F-X display levels.
+            set_level_slider(self.fx_vmin_slider, "fx_vmin")
+            set_level_slider(self.fx_vmax_slider, "fx_vmax")
+
+            # Spectrogram display levels.
+            set_level_slider(self.spec_vmin_slider, "spec_vmin")
+            set_level_slider(self.spec_vmax_slider, "spec_vmax")
+
+            # F-X transform settings.
+            if settings.get("win_s") is not None:
+                self.fx_win_s_spin.setValue(
+                    float(settings["win_s"])
+                )
+
+            if settings.get("fx_nfft") is not None:
+                self.fx_nfft_spin.setValue(
+                    int(settings["fx_nfft"])
+                )
+
+            # Spectrogram settings.
+            if settings.get("spec_nfft") is not None:
+                self.spec_nfft_spin.setValue(
+                    int(settings["spec_nfft"])
+                )
+
+            if settings.get("spec_overlap") is not None:
+                self.spec_overlap_spin.setValue(
+                    int(settings["spec_overlap"])
+                )
+
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+            self.blockSignals(False)
+
+        # One intentional signal after all display controls are synchronized.
+        self.display_settings_changed.emit()

@@ -31,7 +31,11 @@ class ControlPanel(QWidget):
     toggle_labels_requested = pyqtSignal(bool)
     confirm_label_requested = pyqtSignal(int)
     distance_to_cable_changed = pyqtSignal(float)
+    sound_speed_changed = pyqtSignal(float)
     display_settings_changed = pyqtSignal()
+    start_time_requested = pyqtSignal(object)
+    duration_requested = pyqtSignal(float)
+    navigation_step_changed = pyqtSignal(float)
 
     def __init__(self, data_manager, parent=None):
         super().__init__(parent)
@@ -48,7 +52,7 @@ class ControlPanel(QWidget):
         self.annotation_panel = AnnotationPanel()
         self.processing_panel = ProcessingPanel()
         self.display_settings_panel = DisplaySettingsPanel()
-
+        
         # Annotation is directly below Navigation for quick access.
         layout.addWidget(
             self._group("Data Source", self.data_source_panel)
@@ -66,10 +70,6 @@ class ControlPanel(QWidget):
             self._group("Display", self.display_settings_panel)
         )
         
-        self.display_settings_panel.display_settings_changed.connect(
-            self.display_settings_changed.emit
-        )
-
         # ------------------------------------------------------------------
         # Apply/reload button
         # ------------------------------------------------------------------
@@ -102,9 +102,29 @@ class ControlPanel(QWidget):
         self.annotation_panel.distance_to_cable_changed.connect(
             self.distance_to_cable_changed.emit
         )
+        
+        self.annotation_panel.sound_speed_changed.connect(
+            self.sound_speed_changed.emit
+        )
 
         self.annotation_panel.toggle_existing_labels_requested.connect(
             self.toggle_labels_requested.emit
+        )
+        
+        self.display_settings_panel.display_settings_changed.connect(
+            self.display_settings_changed.emit
+        )
+
+        self.navigation_panel.start_time_requested.connect(
+            self.start_time_requested.emit
+        )
+
+        self.navigation_panel.duration_requested.connect(
+            self.duration_requested.emit
+        )
+
+        self.navigation_panel.navigation_step_changed.connect(
+            self.navigation_step_changed.emit
         )
 
     @staticmethod
@@ -121,7 +141,18 @@ class ControlPanel(QWidget):
     # ======================================================================
     # Settings
     # ======================================================================
+    def set_settings(self, settings: dict) -> None:
+        """
+        Populate all control widgets from a dataset profile/settings dictionary.
 
+        This does not load data or apply processing itself.
+        """
+        self.data_source_panel.set_settings(settings)
+        self.navigation_panel.set_settings(settings)
+        self.processing_panel.set_settings(settings)
+        self.display_settings_panel.set_settings(settings)
+        self.annotation_panel.set_settings(settings)
+        
     def get_settings(self) -> dict:
         """Merge current settings from all child panels."""
         settings: dict = {}

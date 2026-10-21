@@ -107,7 +107,8 @@ class DatasetService:
             RawDASSegment,
         ] = OrderedDict()
 
-        self._max_cached_files = 2
+        self._max_cache_bytes = 1024**3  # 1 GiB maximum cache size
+        self._cached_bytes = 0
 
     @property
     def is_open(self) -> bool:
@@ -123,6 +124,26 @@ class DatasetService:
             filepath.resolve(),
             tuple(int(value) for value in selected_channels),
         )
+        
+    @staticmethod
+    def _segment_nbytes(segment: RawDASSegment) -> int:
+        """
+        Estimate memory occupied by a cached raw DAS segment.
+
+        Metadata/Python-object overhead is not included, but the dominant
+        NumPy allocations are included.
+        """
+        total = 0
+
+        for array in (
+            segment.data,
+            segment.time_s,
+            segment.distance_m,
+        ):
+            if isinstance(array, np.ndarray):
+                total += int(array.nbytes)
+
+        return total
 
     def _load_full_file_cached(
         self,
@@ -152,16 +173,50 @@ class DatasetService:
             selected_channels=selected_channels,
         )
 
+        segment_bytes = self._segment_nbytes(segment)
+
+        # Do not cache one source file if it alone exceeds the total budget.
+        # Still return it for immediate use; it simply will not be retained.
+        if segment_bytes > self._max_cache_bytes:
+            logger.warning(
+                "Not caching DAS file %s because it requires %.1f MiB, "
+                "which exceeds cache budget %.1f MiB.",
+                filepath.name,
+                segment_bytes / (1024 ** 2),
+                self._max_cache_bytes / (1024 ** 2),
+            )
+            return segment
+
+        # Ensure enough budget before inserting. Evict LRU source segments.
+        while (
+            self._file_cache
+            and self._cached_bytes + segment_bytes > self._max_cache_bytes
+        ):
+            evicted_key, evicted_segment = self._file_cache.popitem(
+                last=False
+            )
+
+            evicted_bytes = self._segment_nbytes(evicted_segment)
+
+            self._cached_bytes -= evicted_bytes
+
+            logger.debug(
+                "Evicted cached DAS file: %s (%.1f MiB)",
+                evicted_key[0].name,
+                evicted_bytes / (1024 ** 2),
+            )
+
         self._file_cache[key] = segment
         self._file_cache.move_to_end(key)
+        self._cached_bytes += segment_bytes
 
-        # Evict least-recently-used segments.
-        while len(self._file_cache) > self._max_cached_files:
-            evicted_key, _ = self._file_cache.popitem(last=False)
-            logger.debug(
-                "Evicted cached DAS file: %s",
-                evicted_key[0].name,
-            )
+        logger.debug(
+            "Cached DAS file: %s (%.1f MiB; cache %.1f / %.1f MiB)",
+            filepath.name,
+            segment_bytes / (1024 ** 2),
+            self._cached_bytes / (1024 ** 2),
+            self._max_cache_bytes / (1024 ** 2),
+        )
 
         return segment
     
@@ -177,6 +232,7 @@ class DatasetService:
         self.reader.set_interrogator("auto")
         
         self._file_cache.clear()
+        self._cached_bytes = 0
 
     def open_dataset(
         self,
@@ -258,6 +314,7 @@ class DatasetService:
         """
         
         self._file_cache.clear()
+        self._cached_bytes = 0
         
         logger.info(
             "Opening DAS dataset directory: %s",

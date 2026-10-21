@@ -41,6 +41,9 @@ class DataManager(QObject):
 
         self.raw_window_segment = None
         
+        self.dataset_key: str | None = None
+        self.dataset_display_name: str | None = None
+
         self.loaded_data = {
             "amp": None,
             "t": None,
@@ -123,10 +126,12 @@ class DataManager(QObject):
         return start_index, end_index, stride
        
     def open_raw_dataset(
-            self,
-            filepath: str | Path,
-            settings: dict,
-        ) -> None:
+        self,
+        filepath: str | Path,
+        settings: dict,
+        *,
+        initial_start_time: datetime | None = None,
+    ) -> None:
             """
             Open/index a raw DAS dataset directory and load the first window.
             """
@@ -145,7 +150,24 @@ class DataManager(QObject):
             self.filepath = str(filepath)
             self.directory = str(filepath.parent)
 
-            self.current_start_time = self.dataset_record.start_time
+            if initial_start_time is None:
+                self.current_start_time = self.dataset_record.start_time
+
+            else:
+                if initial_start_time.tzinfo is None:
+                    raise ValueError(
+                        "initial_start_time must be timezone-aware."
+                    )
+
+                requested_start_time = initial_start_time.astimezone(
+                    timezone.utc
+                )
+
+                # Do not request a time before the indexed dataset begins.
+                self.current_start_time = max(
+                    self.dataset_record.start_time,
+                    requested_start_time,
+                )
 
             self.selected_channels = self._resolve_selected_channels()
 
@@ -243,19 +265,25 @@ class DataManager(QObject):
             self.dataset_loaded.emit()
     
     def load_current_window(self, recompute_fx: bool = True) -> None:
-        """
-        Perform a full raw-data load followed by processing.
+        start = perf_counter()
 
-        Use this for:
-        - opening a dataset;
-        - navigation;
-        - changing cable range / target dx;
-        - changing duration;
-        - changing boundary-correction settings.
-        """
+        raw_start = perf_counter()
         self.load_raw_current_window()
+        raw_elapsed = perf_counter() - raw_start
+
+        process_start = perf_counter()
         self.reprocess_current_window(
             recompute_fx=recompute_fx,
+        )
+        process_elapsed = perf_counter() - process_start
+
+        total_elapsed = perf_counter() - start
+
+        print(
+            "Window load timing: "
+            f"raw={raw_elapsed:.3f}s, "
+            f"processing={process_elapsed:.3f}s, "
+            f"total={total_elapsed:.3f}s"
         )
     
     def navigate(self, direction: str) -> None:
@@ -286,7 +314,91 @@ class DataManager(QObject):
                 # Do not leave GUI navigation state pointing at an invalid time.
                 self.current_start_time = old_start
                 raise
-            
+           
+    def set_window_start_time(
+        self,
+        start_time: datetime,
+        *,
+        reload_window: bool = True,
+    ) -> None:
+        """
+        Set the displayed window's absolute start time.
+
+        If reload_window is True, immediately load and process the new
+        requested window. On failure, restore the previous valid time.
+        """
+        if not self.dataset_service.is_open:
+            raise RuntimeError("Open a dataset before setting a start time.")
+
+        if start_time.tzinfo is None:
+            raise ValueError(
+                "Start time must be timezone-aware. Use UTC."
+            )
+
+        start_time = start_time.astimezone(timezone.utc)
+
+        old_start_time = self.current_start_time
+        self.current_start_time = start_time
+
+        if not reload_window:
+            self.window_changed.emit(self.current_start_time)
+            return
+
+        try:
+            self.load_current_window(recompute_fx=True)
+
+        except Exception:
+            self.current_start_time = old_start_time
+            raise
+
+    def set_navigation_step_s(
+        self,
+        navigation_step_s: float,
+    ) -> None:
+        """
+        Update navigation step immediately without loading/reprocessing data.
+        """
+        navigation_step_s = float(navigation_step_s)
+
+        if navigation_step_s <= 0:
+            raise ValueError(
+                "Navigation step must be greater than zero."
+            )
+
+        self.user_settings["navigation_step_s"] = navigation_step_s
+
+    def set_duration_s(
+        self,
+        duration_s: float,
+        *,
+        reload_window: bool = True,
+    ) -> None:
+        """
+        Update plot/window duration and optionally immediately reload.
+
+        Duration changes affect raw source loading, so a reload is required
+        when the current window is open.
+        """
+        duration_s = float(duration_s)
+
+        if duration_s <= 0:
+            raise ValueError(
+                "Plot duration must be greater than zero."
+            )
+
+        old_duration_s = self.user_settings.get("duration_s")
+        self.user_settings["duration_s"] = duration_s
+
+        if not reload_window or self.current_start_time is None:
+            return
+
+        try:
+            self.load_current_window(recompute_fx=True)
+
+        except Exception:
+            self.user_settings["duration_s"] = old_duration_s
+            raise
+         
     def apply_user_settings(
         self,
         settings: dict,
@@ -382,12 +494,23 @@ class DataManager(QObject):
         return record.path, float(apex_time_s)
 
     def _recompute_fx_for_current_window(self) -> None:
-        """Recompute F-X slices for the currently loaded time window."""
         if self.loaded_data["amp"] is None:
             return
 
+        start = perf_counter()
+
         self.fx_manager.update_data()
+        fx_elapsed = perf_counter() - start
+
+        spec_start = perf_counter()
         self.spectrogram_manager.update_data()
+        spec_elapsed = perf_counter() - spec_start
+
+        print(
+            "Derived products timing: "
+            f"F-X={fx_elapsed:.3f}s, "
+            f"spectrogram setup={spec_elapsed:.3f}s"
+        )
         
     def set_cursor_mode(self, mode: str) -> None:
         self.cursor_mode = mode
@@ -414,26 +537,26 @@ class FXHandle:
             self.plot_start_time = None
             return
 
-        win_s = float(
+        fx_win_s = float(
             self.data_manager.get_user_settings("fx_win_s") or 2.0
         )
 
-        win_samples = int(round(win_s * fs))
+        fx_win_samples = int(round(fx_win_s * fs))
 
-        if win_samples < 2:
+        if fx_win_samples < 2:
             raise ValueError(
-                f"F-X window is too short: {win_s} s at {fs} Hz."
+                f"F-X window is too short: {fx_win_s} s at {fs} Hz."
             )
 
         requested_nfft = int(
-            self.data_manager.get_user_settings("fx_nfft") or win_samples
+            self.data_manager.get_user_settings("fx_nfft") or fx_win_samples
         )
 
         # Do not truncate the selected F-X time window accidentally.
         # If requested NFFT is larger, this zero-pads the FFT.
-        fx_nfft = max(win_samples, requested_nfft)
+        fx_nfft = max(fx_win_samples, requested_nfft)
 
-        if amp.shape[1] < win_samples:
+        if amp.shape[1] < fx_win_samples:
             # Not enough time samples to make one F-X slice.
             self.fx_series_data = None
             self.freq = None
@@ -441,7 +564,7 @@ class FXHandle:
             self.plot_start_time = []
             return
 
-        step_samples = win_samples
+        step_samples = fx_win_samples
         freqs = np.fft.rfftfreq(fx_nfft, d=1.0 / fs)
 
         slices = []
@@ -449,17 +572,17 @@ class FXHandle:
 
         for start in range(
             0,
-            amp.shape[1] - win_samples + 1,
+            amp.shape[1] - fx_win_samples + 1,
             step_samples,
         ):
-            segment = amp[:, start:start + win_samples]
+            segment = amp[:, start:start + fx_win_samples]
 
             t_win.append(float(t[start]))
 
             # Result shape:
             # (n_channels, n_frequencies)
             spectrum = np.fft.rfft(segment, n=fx_nfft, axis=1)
-            spectrum = 2.0 * np.abs(spectrum) / win_samples
+            spectrum = 2.0 * np.abs(spectrum) / fx_win_samples
             spectrum[:, 0] *= 0.5 # don't double DC bin
 
             if fx_nfft % 2 == 0:

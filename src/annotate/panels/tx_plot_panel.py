@@ -9,10 +9,19 @@ from annotate.config import PLOTCOLOR_LUT, UserSettings
 
 class TXPlotPanel(QWidget):
     point_clicked = pyqtSignal(int, int)
-    label_delete_requested = pyqtSignal(int)
+
+    # Existing saved-label interactions.
+    label_selected = pyqtSignal(int)
 
     apex_dragged = pyqtSignal(float, float)
     endpoint_dragged = pyqtSignal(float, float)
+    
+    annotation_context_requested = pyqtSignal(
+        float,
+        float,
+        object,
+        int,
+    )
 
     def __init__(self, data_manager):
         super().__init__()
@@ -62,6 +71,10 @@ class TXPlotPanel(QWidget):
         # Existing saved annotation overlays.
         self.existing_label_items: list = []
         self.existing_labels_metadata: list[dict] = []
+        
+        # Visible ring around the currently selected existing annotation apex.
+        self.selected_existing_label_item = None
+        self.selected_existing_tx_id: int | None = None
 
         # MainWindow enables this for T-X click annotation stages.
         self.annotation_mode_active = False
@@ -129,6 +142,31 @@ class TXPlotPanel(QWidget):
             "t": self.data_manager.loaded_data["t"],
             "x": self.data_manager.loaded_data["x"],
         })
+
+    def reset_view_to_data_extent(self) -> None:
+        """Show the complete currently loaded T-X data extent."""
+        t_vec = self.data_manager.loaded_data.get("t")
+        x_vec = self.data_manager.loaded_data.get("x")
+
+        if (
+            t_vec is None
+            or x_vec is None
+            or len(t_vec) == 0
+            or len(x_vec) == 0
+        ):
+            return
+
+        t_min = float(np.min(t_vec))
+        t_max = float(np.max(t_vec))
+
+        x_min = float(np.min(x_vec))
+        x_max = float(np.max(x_vec))
+
+        self.plot_widget.getPlotItem().vb.setRange(
+            xRange=(t_min, t_max),
+            yRange=(x_min, x_max),
+            padding=0.02,
+        )
 
     def show_existing_labels(self, labels: list[dict]) -> None:
         """
@@ -228,8 +266,55 @@ class TXPlotPanel(QWidget):
                 self.plot_widget.addItem(side_item)
                 self.existing_label_items.append(side_item)
 
+    def select_existing_label(self, tx_id: int) -> None:
+        """Draw a visible ring around one selected saved annotation apex."""
+        self.clear_existing_label_selection()
+
+        selected = next(
+            (
+                item
+                for item in self.existing_labels_metadata
+                if int(item["tx_id"]) == int(tx_id)
+            ),
+            None,
+        )
+
+        if selected is None:
+            return
+
+        self.selected_existing_tx_id = int(tx_id)
+
+        # Use a large hollow circle so the original red apex remains visible.
+        self.selected_existing_label_item = pg.ScatterPlotItem(
+            x=[float(selected["apex_time_rel"])],
+            y=[float(selected["apex_distance"])],
+            symbol="o",
+            size=18,
+            pen=pg.mkPen("dodgerblue", width=3),
+            brush=None,
+        )
+
+        self.plot_widget.addItem(
+            self.selected_existing_label_item
+        )
+
+    def clear_existing_label_selection(self) -> None:
+        """Remove the visual selection indicator for an existing label."""
+        if self.selected_existing_label_item is not None:
+            try:
+                self.plot_widget.removeItem(
+                    self.selected_existing_label_item
+                )
+            except Exception:
+                pass
+
+        self.selected_existing_label_item = None
+        self.selected_existing_tx_id = None
+
     def hide_existing_labels(self) -> None:
-        """Remove all saved-label overlays."""
+        """Remove all saved-label overlays and existing-label selection."""
+        self.clear_existing_label_selection()
+
         for item in self.existing_label_items:
             try:
                 self.plot_widget.removeItem(item)
@@ -412,19 +497,58 @@ class TXPlotPanel(QWidget):
         row_idx = int(np.argmin(np.abs(x_vec - mouse_point.y())))
         col_idx = int(np.argmin(np.abs(t_vec - mouse_point.x())))
 
+        # Right-click opens the annotation context menu. It must be handled
+        # before normal annotation/spectrogram click logic so a right-click
+        # cannot accidentally place an apex or endpoint.
+        if event.button() == Qt.MouseButton.RightButton:
+            nearby_index = self._nearest_existing_label(
+                float(mouse_point.x()),
+                float(mouse_point.y()),
+            )
+
+            nearby_tx_id = -1
+
+            if nearby_index is not None:
+                nearby_tx_id = int(
+                    self.existing_labels_metadata[nearby_index]["tx_id"]
+                )
+
+            self.annotation_context_requested.emit(
+                float(t_vec[col_idx]),
+                float(x_vec[row_idx]),
+                event.screenPos().toPoint(),
+                nearby_tx_id,
+            )
+            return
+
         # Annotation stage clicks are handled in MainWindow.on_point_clicked().
-        if self.annotation_mode_active:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.annotation_mode_active
+        ):
             self.point_clicked.emit(row_idx, col_idx)
             return
 
         # Spectrogram row-selection mode.
-        if self.data_manager.cursor_mode == "s":
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.data_manager.cursor_mode == "s"
+        ):
+            self.point_clicked.emit(row_idx, col_idx)
+            return
+        
+        # Paste mode uses a click in the T-X plot as the new apex location.
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.data_manager.cursor_mode == "paste_annotation"
+        ):
             self.point_clicked.emit(row_idx, col_idx)
             return
 
-        # Ctrl-click near an existing saved apex deletes a saved annotation.
+        # A normal left-click near an existing saved apex selects that label.
+        # Existing-label metadata is only populated while labels are shown.
         if (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            event.button() == Qt.MouseButton.LeftButton
             and self.existing_labels_metadata
         ):
             idx = self._nearest_existing_label(
@@ -434,7 +558,7 @@ class TXPlotPanel(QWidget):
 
             if idx is not None:
                 tx_id = self.existing_labels_metadata[idx]["tx_id"]
-                self.label_delete_requested.emit(tx_id)
+                self.label_selected.emit(int(tx_id))
             
     #####################################################################
     # Apex / Endpoint / Distance Annotations
