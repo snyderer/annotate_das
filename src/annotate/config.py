@@ -77,7 +77,7 @@ LABEL_DEFINITIONS: dict[int, LabelDefinition] = {
     ),
     6: LabelDefinition(
         number=6,
-        name="Antrhopogenic",
+        name="Anthropogenic",
         code="Anthro",
     ),
     7: LabelDefinition(
@@ -87,8 +87,8 @@ LABEL_DEFINITIONS: dict[int, LabelDefinition] = {
     ),
     9: LabelDefinition(
         number=9,
-        name="Anthropogenic",
-        code="ANTH",
+        name="Review",
+        code="REVIEW",
     ),
 }
 
