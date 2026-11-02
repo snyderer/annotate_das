@@ -129,10 +129,6 @@ if MODE == "training":
                 source_file=Path(
                     r"D:\training_data\dataset_1\120147.hdf5" 
                 ),
-                annotation_csv=Path(
-                    r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                    r"\learning_annotations.csv"
-                ),
                 interrogator="asn",
                 use_full_cable_length=False,
                 cable_start_m=20_000.0,
@@ -154,10 +150,6 @@ if MODE == "training":
                     r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
                     r"\OptaSense\North_C2"
                     r"\North-C2-HF-P1kHz-GL30m-Sp2m-FS500Hz_2021-11-02T215901Z.h5"
-                ),
-                annotation_csv=Path(
-                    r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                    r"\learning_annotations.csv"
                 ),
                 interrogator="optasense",
                 use_full_cable_length=True,
@@ -181,10 +173,6 @@ if MODE == "training":
                     r"\OptaSense\blue_whales_North_C3"
                     r"\North-C3-HF-P1kHz-GL30m-Sp2m_2021-11-02T140115Z.h5"
                 ),
-                annotation_csv=Path(
-                    r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                    r"\learning_annotations.csv"
-                ),
                 interrogator="optasense",
                 use_full_cable_length=True,
                 cable_start_m=0,
@@ -207,10 +195,6 @@ if MODE == "training":
                     r"\OptaSense\South_C1"
                     r"\South-C1-LR-95km-P1kHz-GL50m-SP2m-FS200Hz_2021-11-02T103714Z.h5"
                 ),
-                annotation_csv=Path(
-                    r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                    r"\learning_annotations.csv"
-                ),
                 interrogator="optasense",
                 use_full_cable_length=True,
                 cable_start_m=20_000.0,
@@ -226,10 +210,6 @@ if MODE == "training":
                 display_name="OOI Silixa",
                 source_file=Path(
                     r"C:\path\to\OOI\Silixa\example_file.tdms"
-                ),
-                annotation_csv=Path(
-                    r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                    r"\learning_annotations.csv"
                 ),
                 interrogator="silixa",
                 use_full_cable_length=True,
@@ -250,10 +230,6 @@ elif MODE == "annotating":
             display_name="Svalbard",
             source_file=Path(
                 r"D:\testingData\Svalbard\data\120147.hdf5" # FIXME: Update to real Svalbard file path.
-            ),
-            annotation_csv=Path(
-                r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                r"\learning_annotations.csv"
             ),
             interrogator="asn",
             use_full_cable_length=False,
@@ -277,10 +253,6 @@ elif MODE == "annotating":
                 r"\OptaSense\North_C2"
                 r"\North-C2-HF-P1kHz-GL30m-Sp2m-FS500Hz_2021-11-02T215901Z.h5"
             ),
-            annotation_csv=Path(
-                r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                r"\learning_annotations.csv"
-            ),
             interrogator="optasense",
             use_full_cable_length=True,
             cable_start_m=0,
@@ -302,10 +274,6 @@ elif MODE == "annotating":
                 r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
                 r"\OptaSense\blue_whales_North_C3"
                 r"\North-C3-HF-P1kHz-GL30m-Sp2m_2021-11-02T140115Z.h5"
-            ),
-            annotation_csv=Path(
-                r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                r"\learning_annotations.csv"
             ),
             interrogator="optasense",
             use_full_cable_length=True,
@@ -329,10 +297,6 @@ elif MODE == "annotating":
                 r"\OptaSense\South_C1"
                 r"\South-C1-LR-95km-P1kHz-GL50m-SP2m-FS200Hz_2021-11-02T103714Z.h5"
             ),
-            annotation_csv=Path(
-                r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                r"\learning_annotations.csv"
-            ),
             interrogator="optasense",
             use_full_cable_length=True,
             cable_start_m=20_000.0,
@@ -349,10 +313,10 @@ elif MODE == "annotating":
             source_file=Path(
                 r"C:\path\to\OOI\Silixa\example_file.tdms"
             ),
-            annotation_csv=Path(
-                r"C:\Users\ers334\Desktop\projects\labeling_2026"
-                r"\learning_annotations.csv"
-            ),
+            # annotation_csv=Path(
+            #     r"C:\Users\ers334\Desktop\projects\labeling_2026"
+            #     r"\learning_annotations.csv"
+            # ),
             interrogator="silixa",
             use_full_cable_length=True,
             cable_start_m=0.0,
@@ -368,10 +332,6 @@ elif MODE == "annotating":
         #     display_name="St. Lawrence",
         #     source_file=Path(
         #         r"C:\path\to\StLawrence\example_file.h5"
-        #     ),
-        #     annotation_csv=Path(
-        #         r"C:\Users\ers334\Desktop\projects\labeling_2026"
-        #         r"\learning_annotations.csv"
         #     ),
         #     interrogator="auto",
         #     use_full_cable_length=False,

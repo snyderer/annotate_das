@@ -5,15 +5,19 @@ from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+from pathlib import Path
 
 
 # ============================================================================
 # Application defaults
 # ============================================================================
-
-DEFAULT_DATASET_PATH = r"C:\Users\ers334\Desktop\testingData\OOI\DASData\OptaSense\blue_whales_North_C3"
-DEFAULT_SAVE_PATH = (
-    r"C:\Users\ers334\Desktop\projects\labeling_2026\test.csv"
+DEFAULT_DATASET_PATH = r"D:/blue_whale"
+DEFAULT_SAVE_PATH = (        
+        Path.home()
+        / "Desktop"
+        / "DAS"
+        / "BWannotations.csv"
 )
 
 BANDPASS_PRESETS = {
