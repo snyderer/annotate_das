@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-
+from annotate.config import MODE
 
 @dataclass(frozen=True)
 class DatasetProfile:
@@ -116,12 +116,8 @@ class DatasetProfile:
         settings.update(self.extra_settings)
 
         return settings   
-    
-MODE = "training"
-# MODE = "skill_assessment"
-# MODE = "annotating"
-    
-if MODE == "training":
+       
+if MODE == "debugging":
     DATASET_PROFILES: dict[str, DatasetProfile] = {
             "dataset_1": DatasetProfile(
                 key="svalbard",
@@ -221,8 +217,10 @@ if MODE == "training":
                 sound_speed_mps=1500.0,
             ),
     }
+elif MODE == "training":
+    pass # TODO
 elif MODE == "skill_assessment":
-    pass
+    pass # TODO
 elif MODE == "annotating":    
     DATASET_PROFILES: dict[str, DatasetProfile] = {
         "svalbard": DatasetProfile(

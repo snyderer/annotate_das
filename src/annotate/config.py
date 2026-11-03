@@ -8,16 +8,21 @@ import numpy as np
 import os
 from pathlib import Path
 
+MODE = "debugging"
+# MODE = "training"
+# MODE = "skill_assessment"
+# MODE = "annotating"
 
 # ============================================================================
 # Application defaults
 # ============================================================================
 DEFAULT_DATASET_PATH = r"D:/blue_whale"
-DEFAULT_SAVE_PATH = (        
-        Path.home()
-        / "Desktop"
-        / "DAS"
-        / "BWannotations.csv"
+
+DEFAULT_SAVE_PATH = str(
+    Path.home()
+    / "Desktop"
+    / "DAS"
+    / "annotations.csv"
 )
 
 BANDPASS_PRESETS = {
