@@ -14,6 +14,7 @@ from annotate.data.processing import stitch_file_offsets
 
 logger = logging.getLogger(__name__)
 
+from time import perf_counter
 
 @dataclass(frozen=True)
 class FileRecord:
@@ -161,12 +162,22 @@ class DatasetService:
         cached = self._file_cache.get(key)
 
         if cached is not None:
-            # Mark this item as most recently used.
             self._file_cache.move_to_end(key)
-            logger.debug("Using cached DAS file: %s", filepath.name)
+
+            print(
+                "DAS file cache HIT: "
+                f"{filepath.name} | "
+                f"{self._segment_nbytes(cached) / (1024 ** 2):.1f} MiB"
+            )
+
             return cached
 
         logger.debug("Loading DAS file: %s", filepath.name)
+
+        print(
+            "DAS file cache MISS: "
+            f"{filepath.name}"
+        )
 
         segment = self.reader.load_file(
             filepath=filepath,
@@ -175,9 +186,16 @@ class DatasetService:
 
         segment_bytes = self._segment_nbytes(segment)
 
-        # Do not cache one source file if it alone exceeds the total budget.
-        # Still return it for immediate use; it simply will not be retained.
+        # Do not cache a file that alone exceeds the configured cache budget.
+        # It is still returned for immediate use, but is not retained.
         if segment_bytes > self._max_cache_bytes:
+            print(
+                "DAS file not cached: "
+                f"{filepath.name} | "
+                f"file={segment_bytes / (1024 ** 2):.1f} MiB | "
+                f"budget={self._max_cache_bytes / (1024 ** 2):.1f} MiB"
+            )
+
             logger.warning(
                 "Not caching DAS file %s because it requires %.1f MiB, "
                 "which exceeds cache budget %.1f MiB.",
@@ -185,37 +203,44 @@ class DatasetService:
                 segment_bytes / (1024 ** 2),
                 self._max_cache_bytes / (1024 ** 2),
             )
+
             return segment
 
-        # Ensure enough budget before inserting. Evict LRU source segments.
+        # Evict least-recently-used cached files until the new source file
+        # fits inside the byte budget.
         while (
             self._file_cache
-            and self._cached_bytes + segment_bytes > self._max_cache_bytes
+            and (
+                self._cached_bytes + segment_bytes
+                > self._max_cache_bytes
+            )
         ):
             evicted_key, evicted_segment = self._file_cache.popitem(
                 last=False
             )
 
-            evicted_bytes = self._segment_nbytes(evicted_segment)
+            evicted_bytes = self._segment_nbytes(
+                evicted_segment
+            )
 
             self._cached_bytes -= evicted_bytes
 
-            logger.debug(
-                "Evicted cached DAS file: %s (%.1f MiB)",
-                evicted_key[0].name,
-                evicted_bytes / (1024 ** 2),
+            print(
+                "DAS file cache EVICT: "
+                f"{evicted_key[0].name} | "
+                f"{evicted_bytes / (1024 ** 2):.1f} MiB"
             )
 
         self._file_cache[key] = segment
         self._file_cache.move_to_end(key)
         self._cached_bytes += segment_bytes
 
-        logger.debug(
-            "Cached DAS file: %s (%.1f MiB; cache %.1f / %.1f MiB)",
-            filepath.name,
-            segment_bytes / (1024 ** 2),
-            self._cached_bytes / (1024 ** 2),
-            self._max_cache_bytes / (1024 ** 2),
+        print(
+            "DAS file cached: "
+            f"{filepath.name} | "
+            f"file={segment_bytes / (1024 ** 2):.1f} MiB | "
+            f"cache={self._cached_bytes / (1024 ** 2):.1f} / "
+            f"{self._max_cache_bytes / (1024 ** 2):.1f} MiB"
         )
 
         return segment
@@ -626,11 +651,19 @@ class DatasetService:
 
         pieces: list[RawDASSegment] = []
 
+        source_load_start = perf_counter()
+
         for record in records:
+            record_start = perf_counter()
+
             full_segment = self._load_full_file_cached(
                 filepath=record.path,
                 selected_channels=selected_channels,
             )
+
+            file_load_elapsed = perf_counter() - record_start
+
+            crop_start = perf_counter()
 
             piece = self._crop_segment(
                 segment=full_segment,
@@ -638,8 +671,21 @@ class DatasetService:
                 end_time=end_time,
             )
 
+            crop_elapsed = perf_counter() - crop_start
+
+            print(
+                "DAS source timing: "
+                f"{record.path.name} | "
+                f"load/cache={file_load_elapsed:.3f}s | "
+                f"crop={crop_elapsed:.3f}s | "
+                f"coverage={record.start_time.isoformat()} "
+                f"to {record.end_time.isoformat()}"
+            )
+
             if piece is not None:
                 pieces.append(piece)
+
+        source_load_elapsed = perf_counter() - source_load_start
 
         if not pieces:
             raise ValueError(
@@ -647,11 +693,36 @@ class DatasetService:
                 "index, but no DAS samples were found in that window."
             )
         
+        stitch_elapsed = 0.0
+
         if correct_file_boundaries:
+            stitch_start = perf_counter()
+
             pieces = stitch_file_offsets(
                 pieces,
-                edge_duration_s=boundary_edge_duration_s, 
+                edge_duration_s=boundary_edge_duration_s,
             )
+
+            stitch_elapsed = perf_counter() - stitch_start
+
+        concatenate_start = perf_counter()
+
+        result = self._concatenate_segments(
+            pieces=pieces,
+            requested_start_time=start_time,
+        )
+
+        concatenate_elapsed = perf_counter() - concatenate_start
+
+        print(
+            "Raw-window timing: "
+            f"source-load/crop={source_load_elapsed:.3f}s | "
+            f"stitch={stitch_elapsed:.3f}s | "
+            f"concatenate={concatenate_elapsed:.3f}s | "
+            f"source-files={len(records)}"
+        )
+
+        return result
 
 
         return self._concatenate_segments(

@@ -291,6 +291,20 @@ class MainWindow(QMainWindow):
         self.data_manager.dataset_loaded.connect(
             self._refresh_existing_labels_after_data_load
         )
+        
+        self.data_manager.window_loading_started.connect(
+            self.on_window_loading_started
+        )
+
+        self.data_manager.window_loading_failed.connect(
+            self.on_window_loading_failed
+        )
+        
+        
+        self.data_manager.dataset_loaded.connect(
+            self.on_async_window_loaded
+        )
+        
         # ------------------------------------------------------------------
         # Plot interactions
         # ------------------------------------------------------------------
@@ -612,29 +626,10 @@ class MainWindow(QMainWindow):
             self.data_manager.apply_user_settings(settings)
             self._configure_label_saver(settings)
 
-            raw_reload_keys = {
-                "duration_s",
-                "use_full_cable_length",
-                "cable_start_m",
-                "cable_end_m",
-                "target_dx_m",
-                "file_boundary_correction_enabled",
-                "file_boundary_edge_duration_s",
-            }
-
-            raw_reload_needed = any(
-                old_settings.get(key) != settings.get(key)
-                for key in raw_reload_keys
+            if self.data_manager.current_start_time is not None:
+                self.data_manager.request_window_async(
+                    self.data_manager.current_start_time
             )
-
-            if raw_reload_needed:
-                self.data_manager.load_current_window(
-                    recompute_fx=True
-                )
-            else:
-                self.data_manager.reprocess_current_window(
-                    recompute_fx=True
-                )
 
             self.statusBar().showMessage("Settings applied.")
 
@@ -677,6 +672,42 @@ class MainWindow(QMainWindow):
             self.spectrogram_panel.update_plot(
                 self.spectrogram_panel.last_row_idx
             )
+
+    def on_window_loading_started(
+        self,
+        start_time: datetime,
+    ) -> None:
+        self.statusBar().showMessage(
+            "Loading DAS window: "
+            f"{start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
+
+        # Optional: prevent repeated navigation requests while one request is
+        # pending. You can leave the rest of the GUI interactive.
+        self.control_panel.btn_back.setEnabled(False)
+        self.control_panel.btn_forward.setEnabled(False)
+
+    def on_window_loading_failed(
+        self,
+        traceback_text: str,
+    ) -> None:
+        self.control_panel.btn_back.setEnabled(True)
+        self.control_panel.btn_forward.setEnabled(True)
+
+        self.statusBar().showMessage(
+            "Could not load requested window."
+        )
+
+        print(traceback_text)
+
+    def closeEvent(self, event) -> None:
+        """Shut down background worker resources before closing Qt."""
+        self.data_manager.shutdown_loader()
+        event.accept()
+        
+    def on_async_window_loaded(self) -> None:
+        self.control_panel.btn_back.setEnabled(True)
+        self.control_panel.btn_forward.setEnabled(True)
 
     def navigate_backward(self) -> None:
         self._navigate("backward")

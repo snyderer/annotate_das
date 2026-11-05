@@ -123,7 +123,7 @@ if MODE == "debugging":
                 key="svalbard",
                 display_name="Svalbard",
                 source_file=Path(
-                    r"D:\training_data\dataset_1\120147.hdf5" 
+                    r"C:\Users\ers334\Desktop\testingData\Svalbard\data\120057.hdf5" 
                 ),
                 interrogator="asn",
                 use_full_cable_length=False,

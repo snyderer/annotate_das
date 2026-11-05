@@ -4,12 +4,19 @@ from pathlib import Path
 
 import numpy as np
 import scipy.signal as sp
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 from annotate.config import UserSettings
 
 from annotate.data.dataset_service import DatasetService, FileRecord
 from annotate.data.processing import apply_processing
+from annotate.data.window_loading import (
+    PreparedWindow,
+    WindowLoadRequest,
+)
+from annotate.data.window_loader_worker import (
+    WindowLoaderWorker,
+)
 
 from time import perf_counter # For debugging performance
 
@@ -21,13 +28,69 @@ class DataManager(QObject):
 
     dataset_opened = pyqtSignal(object)   # FileRecord
     window_changed = pyqtSignal(object)   # datetime
+    
+    window_loading_started = pyqtSignal(object)  # datetime
+    window_loading_failed = pyqtSignal(str)
+    
+    load_requested = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
 
         self.dataset_service = DatasetService()
+        
+        self._window_request_id = 0
+        self._active_window_request_id: int | None = None
+
+        self._loader_thread = QThread(self)
+        self._loader_worker = WindowLoaderWorker()
+ 
+        self._loader_thread.finished.connect(
+            self._loader_worker.deleteLater
+        )
+ 
+        self._loader_worker.moveToThread(
+            self._loader_thread
+        )
+
+        self._loader_thread.start()
+
+        self._loader_worker.window_ready.connect(
+            self._on_worker_window_ready
+        )
+        self._loader_worker.window_failed.connect(
+            self._on_worker_window_failed
+        )
+
+        self.load_requested.connect(
+            self._loader_worker.prepare_window
+        )
 
         self.user_settings = asdict(UserSettings())
+        
+        # One fully processed speculative forward window.
+        self._prefetched_window: PreparedWindow | None = None
+        self._prefetch_key: tuple | None = None
+        self._prefetch_request_id: int | None = None
+        self._prefetch_pending = False
+        
+        # Incremented whenever a prefetch timer/result should become obsolete.
+        self._prefetch_generation = 0
+
+        # Keep the timer object so it can be stopped/replaced instead of leaving
+        # several old QTimer.singleShot callbacks queued.
+        self._prefetch_timer = QTimer(self)
+        self._prefetch_timer.setSingleShot(True)
+        self._prefetch_timer.timeout.connect(
+            self._request_forward_prefetch
+        )
+
+        self._prefetch_delay_ms = 3_000
+
+        # Delay before starting a speculative prefetch. This gives a user who
+        # immediately presses Forward a chance to request a normal visible load
+        # before the worker begins low-priority work.
+        self._prefetch_delay_ms = 3_000
 
         self.current_start_time: datetime | None = None
         self.selected_channels: tuple[int, int, int] | None = None
@@ -63,7 +126,454 @@ class DataManager(QObject):
         self.spectrogram_manager = SpectrogramHandle(self)
         
         self.raw_window_segment = None
+    
+    def _window_cache_key(
+        self,
+        *,
+        start_time: datetime,
+    ) -> tuple:
+        """
+        Return a stable identifier for one fully prepared display window.
+
+        Includes all current settings because any processing/cable/F-X setting
+        may change the prepared numeric result.
+        """
+        return (
+            Path(self.filepath).resolve()
+            if self.filepath is not None
+            else None,
+
+            start_time.astimezone(timezone.utc),
+
+            float(
+                self.user_settings.get("duration_s", 40.0)
+            ),
+
+            tuple(self.selected_channels or ()),
+
+            # Easy and conservative during development: invalidate prefetch
+            # whenever any stored setting changes.
+            repr(
+                sorted(
+                    self.user_settings.items(),
+                    key=lambda item: item[0],
+                )
+            ),
+        )
+   
+    def _clear_prefetch(self) -> None:
+        """Discard a completed/pending speculative forward result."""
+        self._prefetch_generation += 1
+
+        if self._prefetch_timer.isActive():
+            self._prefetch_timer.stop()
+
+        self._prefetched_window = None
+        self._prefetch_key = None
+        self._prefetch_request_id = None
+        self._prefetch_pending = False
+
+    def _install_prepared_window(
+        self,
+        result: PreparedWindow,
+    ) -> None:
+        """
+        Install a worker-produced window into GUI-visible DataManager state.
+
+        This method is called only in the DataManager/main Qt thread.
+        """
+        self.raw_window_segment = result.raw_segment
+        self.loaded_segment = result.raw_segment
+        self.loaded_fs_hz = result.processed_fs_hz
+
+        self.loaded_data = {
+            "amp": result.amp_display,
+            "t": result.time_s,
+            "x": result.distance_m,
+            "time_stamps": np.array([
+                result.raw_segment.start_time.timestamp()
+            ]),
+        }
+
+        self.current_start_time = result.raw_segment.start_time
+
+        # The worker already generated F-X values, so do not recompute them.
+        self.fx_manager.fx_series_data = result.fx_amp
+        self.fx_manager.freq = result.fx_freq
+        self.fx_manager.x = result.fx_distance_m
+        self.fx_manager.plot_start_time = result.fx_time_s
+
+        self.window_changed.emit(
+            self.current_start_time
+        )
+
+        self.dataset_loaded.emit()
+    
+    def request_window_async(
+        self,
+        start_time: datetime,
+    ) -> None:
+        """
+        Request a visible window asynchronously.
+
+        If the requested window has already been prefetched, install it
+        immediately. If that exact window is still being prefetched, promote
+        the prefetch result into the active visible request rather than
+        enqueueing duplicate expensive work.
+        """
+        if not self.dataset_service.is_open:
+            raise RuntimeError("No raw DAS dataset is open.")
+
+        if self.selected_channels is None:
+            raise RuntimeError("No DAS channel range is selected.")
+
+        if self.filepath is None:
+            raise RuntimeError(
+                "No selected DAS source file is available."
+            )
+
+        if start_time.tzinfo is None:
+            raise ValueError(
+                "Window start time must be timezone-aware."
+            )
+
+        start_time = start_time.astimezone(timezone.utc)
+
+        requested_key = self._window_cache_key(
+            start_time=start_time,
+        )
+
+        # --------------------------------------------------------------
+        # Case 1: completed prefetch exists. Install it immediately.
+        # --------------------------------------------------------------
+        # A fully prepared forward window already exists. Install it immediately.
+        if (
+            self._prefetched_window is not None
+            and self._prefetch_key == requested_key
+        ):
+            result = self._prefetched_window
+
+            print(
+                "FORWARD PREFETCH HIT: "
+                f"{start_time.isoformat()} "
+                f"(request_id={result.request_id})"
+            )
+
+            self._clear_prefetch()
+            self._install_prepared_window(result)
+
+            # Begin preparing the following forward window after the normal delay.
+            self.schedule_forward_prefetch()
+            
+            return
+
+        # --------------------------------------------------------------
+        # Case 2: the exact desired next window is still loading as a
+        # prefetch. Promote it to the active visible request.
+        #
+        # Do not submit duplicate disk/processing work.
+        # --------------------------------------------------------------
+        if (
+            self._prefetch_pending
+            and self._prefetch_key == requested_key
+            and self._prefetch_request_id is not None
+        ):
+            self._active_window_request_id = (
+                self._prefetch_request_id
+            )
+
+            self.window_loading_started.emit(start_time)
+
+            return
+
+        # --------------------------------------------------------------
+        # Case 3: normal visible request.
+        # --------------------------------------------------------------
+        self._window_request_id += 1
+        request_id = self._window_request_id
+
+        self._active_window_request_id = request_id
+
+        request = WindowLoadRequest(
+            request_id=request_id,
+            selected_file=Path(self.filepath),
+            interrogator=str(
+                self.dataset_service.interrogator
+            ),
+            start_time=start_time,
+            duration_s=float(
+                self.user_settings.get("duration_s", 40.0)
+            ),
+            selected_channels=self.selected_channels,
+            correct_file_boundaries=bool(
+                self.user_settings.get(
+                    "file_boundary_correction_enabled",
+                    True,
+                )
+            ),
+            boundary_edge_duration_s=float(
+                self.user_settings.get(
+                    "file_boundary_edge_duration_s",
+                    0.25,
+                )
+            ),
+            processing_settings=self.user_settings.copy(),
+            kind="visible",
+        )
+
+        # The exact requested window is already being computed as a prefetch.
+        # Do not submit duplicate HDF5/processing work. Mark it as the active
+        # visible request; when the worker completes, its result will display.
+        if (
+            self._prefetch_pending
+            and self._prefetch_key == requested_key
+            and self._prefetch_request_id is not None
+        ):
+            self._active_window_request_id = (
+                self._prefetch_request_id
+            )
+
+            print(
+                "FORWARD PREFETCH PROMOTED: "
+                f"{start_time.isoformat()} "
+                f"(request_id={self._prefetch_request_id})"
+            )
+
+            self.window_loading_started.emit(start_time)
+
+            return
         
+        self.window_loading_started.emit(start_time)
+        self.load_requested.emit(request)
+    
+    def schedule_forward_prefetch(self) -> None:
+        """
+        Prepare the likely next forward window after a short idle delay.
+
+        The delay prevents the prefetch from immediately occupying the only
+        worker thread when the user may want to navigate again right away.
+        """
+        if (
+            self.current_start_time is None
+            or self.selected_channels is None
+            or self.filepath is None
+            or not self.dataset_service.is_open
+        ):
+            return
+
+        # Replace any old delayed prefetch timer with a new one.
+        if self._prefetch_timer.isActive():
+            self._prefetch_timer.stop()
+
+        self._prefetch_timer.start(
+            self._prefetch_delay_ms
+        )
+
+    def _request_forward_prefetch(self) -> None:
+        """
+        Start a low-priority load of exactly one likely forward window.
+        """
+        if (
+            self.current_start_time is None
+            or self.selected_channels is None
+            or self.filepath is None
+            or not self.dataset_service.is_open
+        ):
+            return
+
+        # Do not queue another prefetch while one is already being computed.
+        if self._prefetch_pending:
+            return
+
+        step_s = float(
+            self.user_settings.get(
+                "navigation_step_s",
+                25.0,
+            )
+        )
+
+        next_start_time = self.current_start_time + timedelta(
+            seconds=step_s
+        )
+
+        prefetch_key = self._window_cache_key(
+            start_time=next_start_time,
+        )
+
+        # Already have the desired completed forward window.
+        if (
+            self._prefetched_window is not None
+            and self._prefetch_key == prefetch_key
+        ):
+            return
+
+        self._window_request_id += 1
+
+        request_id = self._window_request_id
+
+        self._prefetch_key = prefetch_key
+        self._prefetch_request_id = request_id
+        self._prefetch_pending = True
+
+        request = WindowLoadRequest(
+            request_id=request_id,
+
+            selected_file=Path(self.filepath),
+            interrogator=str(
+                self.dataset_service.interrogator
+            ),
+
+            start_time=next_start_time,
+            duration_s=float(
+                self.user_settings.get(
+                    "duration_s",
+                    40.0,
+                )
+            ),
+
+            selected_channels=self.selected_channels,
+
+            correct_file_boundaries=bool(
+                self.user_settings.get(
+                    "file_boundary_correction_enabled",
+                    True,
+                )
+            ),
+
+            boundary_edge_duration_s=float(
+                self.user_settings.get(
+                    "file_boundary_edge_duration_s",
+                    0.25,
+                )
+            ),
+
+            processing_settings=self.user_settings.copy(),
+
+            kind="prefetch",
+        )
+
+        print(
+            "Starting forward prefetch: "
+            f"{next_start_time.isoformat()} "
+            f"(request_id={request_id})"
+        )
+
+        self.load_requested.emit(request)
+    
+    def shutdown_loader(self) -> None:
+        """Stop the background window-loader thread during application exit."""
+        if self._loader_thread.isRunning():
+            self._loader_thread.quit()
+            self._loader_thread.wait()
+            
+    def _on_worker_window_ready(
+        self,
+        result: PreparedWindow,
+    ) -> None:
+        """
+        Handle a completed visible request or speculative prefetch.
+
+        Runs in DataManager's GUI/main Qt thread.
+        """
+        # --------------------------------------------------------------
+        # Completed speculative forward prefetch.
+        # --------------------------------------------------------------
+        if result.request_id == self._prefetch_request_id:
+            self._prefetch_pending = False
+
+            # User pressed Forward while the prefetch was still loading.
+            # The prefetch was promoted to the visible request.
+            if result.request_id == self._active_window_request_id:
+                print(
+                    "FORWARD PREFETCH PROMOTED RESULT: "
+                    f"{result.requested_start_time.isoformat()}"
+                )
+
+                self._clear_prefetch()
+                self._install_prepared_window(result)
+                self.schedule_forward_prefetch()
+                return
+
+            # Store completed speculative result for a later matching Forward.
+            self._prefetched_window = result
+
+            print(
+                "Forward prefetch ready: "
+                f"{result.requested_start_time.isoformat()} "
+                f"(request_id={result.request_id})"
+            )
+
+            return
+
+        # --------------------------------------------------------------
+        # Completed visible request.
+        # --------------------------------------------------------------
+        if result.request_id != self._active_window_request_id:
+            print(
+                "Discarding stale visible result: "
+                f"{result.requested_start_time.isoformat()} "
+                f"(request_id={result.request_id})"
+            )
+            return
+
+        print(
+            "Visible window ready: "
+            f"{result.requested_start_time.isoformat()} "
+            f"(request_id={result.request_id})"
+        )
+
+        self._install_prepared_window(result)
+        self.schedule_forward_prefetch()
+
+    def _on_worker_window_failed(
+        self,
+        request_id: int,
+        traceback_text: str,
+    ) -> None:
+        """Handle worker failures for visible or speculative requests."""
+        if request_id == self._prefetch_request_id:
+            print(
+                "Forward prefetch failed:\n"
+                f"{traceback_text}"
+            )
+
+            self._clear_prefetch()
+            return
+
+        if request_id != self._active_window_request_id:
+            return
+
+        self.window_loading_failed.emit(
+            traceback_text
+        )
+    
+    @staticmethod
+    def _prepared_window_nbytes(
+        result: PreparedWindow,
+    ) -> int:
+        total = 0
+
+        arrays = (
+            result.raw_segment.data,
+            result.raw_segment.time_s,
+            result.raw_segment.distance_m,
+
+            result.amp_display,
+            result.time_s,
+            result.distance_m,
+
+            result.fx_amp,
+            result.fx_freq,
+            result.fx_distance_m,
+            result.fx_time_s,
+        )
+
+        for array in arrays:
+            if isinstance(array, np.ndarray):
+                total += int(array.nbytes)
+
+        return total
+    
     def _resolve_selected_channels(self) -> tuple[int, int, int]:
         """
         Convert user physical cable settings into DAS4Whales channel settings.
@@ -135,6 +645,9 @@ class DataManager(QObject):
             """
             Open/index a raw DAS dataset directory and load the first window.
             """
+            
+            self._invalidate_pending_window_requests()
+            
             filepath = Path(filepath).resolve()
 
             self.apply_user_settings(settings)
@@ -173,96 +686,111 @@ class DataManager(QObject):
 
             self.dataset_opened.emit(self.dataset_record)
 
-            self.load_current_window(recompute_fx=True)
-
+            # This is lightweight metadata/UI information; the actual raw data window
+            # is requested asynchronously below.
             self.file_loaded.emit(
                 filepath.name,
                 self.current_start_time.strftime("%Y-%m-%d %H:%M:%S UTC"),
             )
 
+            # Raw DAS load, processing, and F-X computation now happen in the worker.
+            self.request_window_async(self.current_start_time)
+
+    def _invalidate_pending_window_requests(self) -> None:
+        """
+        Mark worker results from the prior dataset/settings state obsolete.
+
+        Running worker operations are not force-cancelled; results are ignored
+        when they eventually return.
+        """
+        self._window_request_id += 1
+        self._active_window_request_id = None
+
+        self._clear_prefetch()
+
     def load_raw_current_window(self) -> None:
-            """
-            Load, crop, stitch, and assemble the current raw DAS window.
+        """
+        Load, crop, stitch, and assemble the current raw DAS window.
 
-            This is the expensive disk-I/O step. It should only run when the
-            requested time window, source dataset, cable range, channel spacing,
-            or boundary-correction settings change.
-            """
-            if not self.dataset_service.is_open:
-                raise RuntimeError("No raw DAS dataset is open.")
+        This is the expensive disk-I/O step. It should only run when the
+        requested time window, source dataset, cable range, channel spacing,
+        or boundary-correction settings change.
+        """
+        if not self.dataset_service.is_open:
+            raise RuntimeError("No raw DAS dataset is open.")
 
-            if self.current_start_time is None:
-                raise RuntimeError("No current start time is set.")
+        if self.current_start_time is None:
+            raise RuntimeError("No current start time is set.")
 
-            if self.selected_channels is None:
-                raise RuntimeError("No DAS channel range is selected.")
+        if self.selected_channels is None:
+            raise RuntimeError("No DAS channel range is selected.")
 
-            duration_s = float(
-                self.user_settings.get("duration_s", 30.0)
-            )
+        duration_s = float(
+            self.user_settings.get("duration_s", 30.0)
+        )
 
-            self.raw_window_segment = self.dataset_service.load_window(
-                start_time=self.current_start_time,
-                duration_s=duration_s,
-                selected_channels=self.selected_channels,
-                correct_file_boundaries=self.user_settings.get(
-                    "file_boundary_correction_enabled",
-                    True,
-                ),
-                boundary_edge_duration_s=float(
-                    self.user_settings.get(
-                        "file_boundary_edge_duration_s",
-                        0.25,
-                    )
-                ),
-            )
+        self.raw_window_segment = self.dataset_service.load_window(
+            start_time=self.current_start_time,
+            duration_s=duration_s,
+            selected_channels=self.selected_channels,
+            correct_file_boundaries=self.user_settings.get(
+                "file_boundary_correction_enabled",
+                True,
+            ),
+            boundary_edge_duration_s=float(
+                self.user_settings.get(
+                    "file_boundary_edge_duration_s",
+                    0.25,
+                )
+            ),
+        )
 
-            self.current_start_time = self.raw_window_segment.start_time
+        self.current_start_time = self.raw_window_segment.start_time
 
     def reprocess_current_window(
-            self,
-            recompute_fx: bool = True,
-        ) -> None:
-            """
-            Reapply bandpass/F-K/downsampling/display conversion to the currently
-            loaded raw window without rereading source files.
-            """
-            if self.raw_window_segment is None:
-                raise RuntimeError("No raw DAS window has been loaded.")
+        self,
+        recompute_fx: bool = True,
+    ) -> None:
+        """
+        Reapply bandpass/F-K/downsampling/display conversion to the currently
+        loaded raw window without rereading source files.
+        """
+        if self.raw_window_segment is None:
+            raise RuntimeError("No raw DAS window has been loaded.")
 
-            amp, fs_processed = apply_processing(
-                amp=self.raw_window_segment.data,
-                fs=self.raw_window_segment.fs_hz,
-                dx_m=self.raw_window_segment.dx_m,
-                settings=self.user_settings,
-            )
+        amp, fs_processed = apply_processing(
+            amp=self.raw_window_segment.data,
+            fs=self.raw_window_segment.fs_hz,
+            dx_m=self.raw_window_segment.dx_m,
+            settings=self.user_settings,
+        )
 
-            amp_display = amp * 1e9
-            
-            t = np.arange(
-                amp_display.shape[1],
-                dtype=float,
-            ) / fs_processed
+        amp_display = amp * 1e9
+        
+        t = np.arange(
+            amp_display.shape[1],
+            dtype=float,
+        ) / fs_processed
 
-            self.loaded_segment = self.raw_window_segment
-            self.loaded_fs_hz = fs_processed
+        self.loaded_segment = self.raw_window_segment
+        self.loaded_fs_hz = fs_processed
 
-            self.loaded_data = {
-                "amp": amp_display,
-                "t": t,
-                "x": self.raw_window_segment.distance_m,
-                "time_stamps": np.array([
-                    self.raw_window_segment.start_time.timestamp()
-                ]),
-            }
+        self.loaded_data = {
+            "amp": amp_display,
+            "t": t,
+            "x": self.raw_window_segment.distance_m,
+            "time_stamps": np.array([
+                self.raw_window_segment.start_time.timestamp()
+            ]),
+        }
 
-            self.current_start_time = self.raw_window_segment.start_time
-            self.window_changed.emit(self.current_start_time)
+        self.current_start_time = self.raw_window_segment.start_time
+        self.window_changed.emit(self.current_start_time)
 
-            if recompute_fx:
-                self._recompute_fx_for_current_window()
+        if recompute_fx:
+            self._recompute_fx_for_current_window()
 
-            self.dataset_loaded.emit()
+        self.dataset_loaded.emit()
     
     def load_current_window(self, recompute_fx: bool = True) -> None:
         start = perf_counter()
@@ -287,48 +815,39 @@ class DataManager(QObject):
         )
     
     def navigate(self, direction: str) -> None:
-            """Move the current display window by the configured step size."""
-            if self.current_start_time is None:
-                raise RuntimeError("Open a dataset before navigating.")
+        """Move the current display window by the configured step size."""
+        if self.current_start_time is None:
+            raise RuntimeError("Open a dataset before navigating.")
 
-            step_s = float(
-                self.user_settings.get("navigation_step_s", 30.0)
+        step_s = float(
+            self.user_settings.get("navigation_step_s", 30.0)
+        )
+
+        if direction == "forward":
+            delta_s = step_s
+        elif direction == "backward":
+            delta_s = -step_s
+        else:
+            raise ValueError(
+                f"Unknown navigation direction: {direction!r}"
             )
 
-            if direction == "forward":
-                delta_s = step_s
-            elif direction == "backward":
-                delta_s = -step_s
-            else:
-                raise ValueError(
-                    f"Unknown navigation direction: {direction!r}"
-                )
+        requested_start = self.current_start_time + timedelta(
+            seconds=delta_s
+        )
 
-            old_start = self.current_start_time
-            self.current_start_time = old_start + timedelta(seconds=delta_s)
-
-            try:
-                self.load_current_window(recompute_fx=True)
-
-            except Exception:
-                # Do not leave GUI navigation state pointing at an invalid time.
-                self.current_start_time = old_start
-                raise
-           
+        self.request_window_async(requested_start)
+            
     def set_window_start_time(
         self,
         start_time: datetime,
         *,
         reload_window: bool = True,
     ) -> None:
-        """
-        Set the displayed window's absolute start time.
-
-        If reload_window is True, immediately load and process the new
-        requested window. On failure, restore the previous valid time.
-        """
         if not self.dataset_service.is_open:
-            raise RuntimeError("Open a dataset before setting a start time.")
+            raise RuntimeError(
+                "Open a dataset before setting a start time."
+            )
 
         if start_time.tzinfo is None:
             raise ValueError(
@@ -337,19 +856,11 @@ class DataManager(QObject):
 
         start_time = start_time.astimezone(timezone.utc)
 
-        old_start_time = self.current_start_time
-        self.current_start_time = start_time
-
-        if not reload_window:
-            self.window_changed.emit(self.current_start_time)
-            return
-
-        try:
-            self.load_current_window(recompute_fx=True)
-
-        except Exception:
-            self.current_start_time = old_start_time
-            raise
+        if reload_window:
+            self.request_window_async(start_time)
+        else:
+            self.current_start_time = start_time
+            self.window_changed.emit(start_time)
 
     def set_navigation_step_s(
         self,
@@ -373,12 +884,6 @@ class DataManager(QObject):
         *,
         reload_window: bool = True,
     ) -> None:
-        """
-        Update plot/window duration and optionally immediately reload.
-
-        Duration changes affect raw source loading, so a reload is required
-        when the current window is open.
-        """
         duration_s = float(duration_s)
 
         if duration_s <= 0:
@@ -386,18 +891,12 @@ class DataManager(QObject):
                 "Plot duration must be greater than zero."
             )
 
-        old_duration_s = self.user_settings.get("duration_s")
         self.user_settings["duration_s"] = duration_s
 
-        if not reload_window or self.current_start_time is None:
-            return
-
-        try:
-            self.load_current_window(recompute_fx=True)
-
-        except Exception:
-            self.user_settings["duration_s"] = old_duration_s
-            raise
+        if reload_window and self.current_start_time is not None:
+            self.request_window_async(
+                self.current_start_time
+            )
          
     def apply_user_settings(
         self,
@@ -406,6 +905,8 @@ class DataManager(QObject):
         emit_signal: bool = True,
     ) -> None:
         """Merge GUI settings into session settings."""
+
+        self._clear_prefetch()
         self.user_settings.update(settings)
 
         if self.dataset_record is not None:
