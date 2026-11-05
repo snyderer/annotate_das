@@ -308,6 +308,18 @@ class MainWindow(QMainWindow):
         # ------------------------------------------------------------------
         # Plot interactions
         # ------------------------------------------------------------------
+        self.tx_plot_panel.cursor_moved.connect(
+            self.on_tx_cursor_moved
+        )
+
+        self.fx_plot_panel.cursor_moved.connect(
+            self.on_fx_cursor_moved
+        )
+
+        self.spectrogram_panel.cursor_moved.connect(
+            self.on_spectrogram_cursor_moved
+        )
+        
         self.fx_series_panel.slice_selected.connect(
             self.on_fx_slice_selected
         )
@@ -941,7 +953,102 @@ class MainWindow(QMainWindow):
     # ========================================================================
     # Plot interactions
     # ========================================================================
+    def on_tx_cursor_moved(
+        self,
+        time_s: float,
+        distance_m: float,
+    ) -> None:
+        """
+        Synchronize cursor guides from T-X.
 
+        T-X:
+            vertical time line + horizontal distance line
+        F-X:
+            horizontal distance line
+        Spectrogram:
+            vertical time line
+        """
+        self.clear_all_cursor_guides()
+        
+        self.tx_plot_panel.set_cursor_guides(
+            time_s=time_s,
+            distance_m=distance_m,
+        )
+
+        self.fx_plot_panel.set_cursor_guides(
+            distance_m=distance_m,
+        )
+
+        self.spectrogram_panel.set_cursor_guides(
+            time_s=time_s,
+        )
+        
+    def on_fx_cursor_moved(
+        self,
+        frequency_hz: float,
+        distance_m: float,
+    ) -> None:
+        """
+        Synchronize cursor guides from F-X.
+
+        F-X:
+            vertical frequency line + horizontal distance line
+        T-X:
+            horizontal distance line
+        Spectrogram:
+            horizontal frequency line
+        """
+        self.clear_all_cursor_guides()
+        
+        self.fx_plot_panel.set_cursor_guides(
+            frequency_hz=frequency_hz,
+            distance_m=distance_m,
+        )
+
+        self.tx_plot_panel.set_cursor_guides(
+            distance_m=distance_m,
+        )
+
+        self.spectrogram_panel.set_cursor_guides(
+            frequency_hz=frequency_hz,
+        )
+        
+    def on_spectrogram_cursor_moved(
+        self,
+        time_s: float,
+        frequency_hz: float,
+    ) -> None:
+        """
+        Synchronize cursor guides from the spectrogram.
+
+        Spectrogram:
+            vertical time line + horizontal frequency line
+        T-X:
+            vertical time line
+        F-X:
+            vertical frequency line
+        """
+        self.clear_all_cursor_guides()
+        
+        self.spectrogram_panel.set_cursor_guides(
+            time_s=time_s,
+            frequency_hz=frequency_hz,
+        )
+
+        self.tx_plot_panel.set_cursor_guides(
+            time_s=time_s,
+        )
+
+        self.fx_plot_panel.set_cursor_guides(
+            frequency_hz=frequency_hz,
+        )
+    
+    def clear_all_cursor_guides(self) -> None:
+        """Hide synchronized mouse-position guides in all plots."""
+        self.tx_plot_panel.clear_cursor_guides()
+        self.fx_plot_panel.clear_cursor_guides()
+        self.spectrogram_panel.clear_cursor_guides()
+        
     def on_fx_slice_selected(self, idx: int) -> None:
         """Show selected F-X thumbnail in the main F-X panel."""
         self.fx_plot_panel.show_slice_from_series(idx)

@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 from PyQt6.QtGui import QPen
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal
 import pyqtgraph as pg
 from annotate.config import PLOTCOLOR_LUT, UserSettings
 import numpy as np
@@ -9,7 +9,8 @@ class SpectrogramPanel(QWidget):
     """
     Spectrogram panel shows frequency vs time for a single row of TX or FX data.
     """
-
+    cursor_moved = pyqtSignal(float, float)
+    
     def __init__(self, data_manager):
         super().__init__()
         self.data_manager = data_manager
@@ -36,7 +37,39 @@ class SpectrogramPanel(QWidget):
         self.img_item.setVisible(False)
         self.plot_widget.addItem(self.img_item)
 
-        
+        self.plot_widget.scene().sigMouseMoved.connect(
+            self._on_scene_mouse_moved
+        )
+
+        # Cursor setup
+        crosshair_pen = pg.mkPen(
+            color=(90, 90, 90, 140),
+            width=1,
+        )
+
+        self.cursor_vline = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=crosshair_pen,
+        )
+
+        self.cursor_hline = pg.InfiniteLine(
+            angle=0,
+            movable=False,
+            pen=crosshair_pen,
+        )
+
+        self.cursor_vline.setVisible(False)
+        self.cursor_hline.setVisible(False)
+
+        self.plot_widget.addItem(
+            self.cursor_vline,
+            ignoreBounds=True,
+        )
+        self.plot_widget.addItem(
+            self.cursor_hline,
+            ignoreBounds=True,
+        )
 
     def update_plot(self, row_idx=None):
         """
@@ -123,3 +156,42 @@ class SpectrogramPanel(QWidget):
         self.plot_widget.addItem(line2)
 
         self.highlight_lines = [line1, line2]
+        
+        
+    def set_cursor_guides(
+        self,
+        *,
+        time_s: float | None = None,
+        frequency_hz: float | None = None,
+    ) -> None:
+        """Show/update crosshair guides in spectrogram coordinates."""
+        if time_s is None:
+            self.cursor_vline.setVisible(False)
+        else:
+            self.cursor_vline.setPos(float(time_s))
+            self.cursor_vline.setVisible(True)
+
+        if frequency_hz is None:
+            self.cursor_hline.setVisible(False)
+        else:
+            self.cursor_hline.setPos(float(frequency_hz))
+            self.cursor_hline.setVisible(True)
+
+    def clear_cursor_guides(self) -> None:
+        self.cursor_vline.setVisible(False)
+        self.cursor_hline.setVisible(False)
+        
+    def _on_scene_mouse_moved(self, scene_pos) -> None:
+        """Emit spectrogram cursor coordinates while pointer is over plot."""
+        plot_item = self.plot_widget.getPlotItem()
+        view_box = plot_item.vb
+
+        if not view_box.sceneBoundingRect().contains(scene_pos):
+            return
+
+        point = view_box.mapSceneToView(scene_pos)
+
+        self.cursor_moved.emit(
+            float(point.x()),
+            float(point.y()),
+        )

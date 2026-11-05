@@ -21,6 +21,7 @@ class FXPlotPanel(QWidget):
     """
 
     point_clicked = pyqtSignal(int, int)
+    cursor_moved = pyqtSignal(float, float)
     roi_changed = pyqtSignal(int)
     
     distance_boundary_dragged = pyqtSignal(str, float)
@@ -75,7 +76,41 @@ class FXPlotPanel(QWidget):
         self.data_manager.settings_changed.connect(
             self.on_settings_changed
         )
+        
+        self.plot_widget.scene().sigMouseMoved.connect(
+            self._on_scene_mouse_moved
+        )
+        
+        # Cursor setup
+        crosshair_pen = pg.mkPen(
+            color=(90, 90, 90, 140),
+            width=1,
+        )
 
+        self.cursor_vline = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=crosshair_pen,
+        )
+
+        self.cursor_hline = pg.InfiniteLine(
+            angle=0,
+            movable=False,
+            pen=crosshair_pen,
+        )
+
+        self.cursor_vline.setVisible(False)
+        self.cursor_hline.setVisible(False)
+
+        self.plot_widget.addItem(
+            self.cursor_vline,
+            ignoreBounds=True,
+        )
+        self.plot_widget.addItem(
+            self.cursor_hline,
+            ignoreBounds=True,
+        )
+        
     # =====================================================================
     # Dataset / display updates
     # =====================================================================
@@ -443,7 +478,44 @@ class FXPlotPanel(QWidget):
     # =====================================================================
     # Mouse interactions
     # =====================================================================
+    def set_cursor_guides(
+        self,
+        *,
+        frequency_hz: float | None = None,
+        distance_m: float | None = None,
+    ) -> None:
+        """Show/update crosshair guides in F-X coordinates."""
+        if frequency_hz is None:
+            self.cursor_vline.setVisible(False)
+        else:
+            self.cursor_vline.setPos(float(frequency_hz))
+            self.cursor_vline.setVisible(True)
 
+        if distance_m is None:
+            self.cursor_hline.setVisible(False)
+        else:
+            self.cursor_hline.setPos(float(distance_m))
+            self.cursor_hline.setVisible(True)
+
+    def clear_cursor_guides(self) -> None:
+        self.cursor_vline.setVisible(False)
+        self.cursor_hline.setVisible(False)
+        
+    def _on_scene_mouse_moved(self, scene_pos) -> None:
+        """Emit F-X cursor coordinates while pointer is over the plot."""
+        plot_item = self.plot_widget.getPlotItem()
+        view_box = plot_item.vb
+
+        if not view_box.sceneBoundingRect().contains(scene_pos):
+            return
+
+        point = view_box.mapSceneToView(scene_pos)
+
+        self.cursor_moved.emit(
+            float(point.x()),
+            float(point.y()),
+        )
+        
     def _roi_at_position(
         self,
         frequency_hz: float,

@@ -9,7 +9,8 @@ from annotate.config import PLOTCOLOR_LUT, UserSettings
 
 class TXPlotPanel(QWidget):
     point_clicked = pyqtSignal(int, int)
-
+    cursor_moved = pyqtSignal(float, float)
+    
     # Existing saved-label interactions.
     label_selected = pyqtSignal(int)
 
@@ -79,9 +80,43 @@ class TXPlotPanel(QWidget):
         # MainWindow enables this for T-X click annotation stages.
         self.annotation_mode_active = False
 
+        self.plot_widget.setTitle("T-X plot (nanostrain)")
+
         # Mouse click connection
         self.plot_widget.scene().sigMouseClicked.connect(self._plot_scene_click)
-        self.plot_widget.setTitle("T-X plot (nanostrain)")
+        self.plot_widget.scene().sigMouseMoved.connect(
+            self._on_scene_mouse_moved
+        )
+        
+        # Cursor setup
+        crosshair_pen = pg.mkPen(
+            color=(90, 90, 90, 140),
+            width=1,
+        )
+
+        self.cursor_vline = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=crosshair_pen,
+        )
+
+        self.cursor_hline = pg.InfiniteLine(
+            angle=0,
+            movable=False,
+            pen=crosshair_pen,
+        )
+
+        self.cursor_vline.setVisible(False)
+        self.cursor_hline.setVisible(False)
+
+        self.plot_widget.addItem(
+            self.cursor_vline,
+            ignoreBounds=True,
+        )
+        self.plot_widget.addItem(
+            self.cursor_hline,
+            ignoreBounds=True,
+        )
 
     #####################################################################
     # Data Manager events
@@ -327,6 +362,45 @@ class TXPlotPanel(QWidget):
     #####################################################################
     # Plot extras
     #####################################################################
+    def set_cursor_guides(
+        self,
+        *,
+        time_s: float | None = None,
+        distance_m: float | None = None,
+    ) -> None:
+        """Show/update crosshair guides in T-X coordinates."""
+        if time_s is None:
+            self.cursor_vline.setVisible(False)
+        else:
+            self.cursor_vline.setPos(float(time_s))
+            self.cursor_vline.setVisible(True)
+
+        if distance_m is None:
+            self.cursor_hline.setVisible(False)
+        else:
+            self.cursor_hline.setPos(float(distance_m))
+            self.cursor_hline.setVisible(True)
+
+    def _on_scene_mouse_moved(self, scene_pos) -> None:
+        """Emit T-X cursor coordinates while pointer is over the plot."""
+        plot_item = self.plot_widget.getPlotItem()
+        view_box = plot_item.vb
+
+        if not view_box.sceneBoundingRect().contains(scene_pos):
+            return
+
+        point = view_box.mapSceneToView(scene_pos)
+
+        self.cursor_moved.emit(
+            float(point.x()),
+            float(point.y()),
+        )
+        
+    def clear_cursor_guides(self) -> None:
+        """Hide T-X cursor guide lines."""
+        self.cursor_vline.setVisible(False)
+        self.cursor_hline.setVisible(False)
+    
     def highlight_time_window(self, t_start, t_end):
         if hasattr(self, 'highlight_lines'):
             for l in self.highlight_lines:
