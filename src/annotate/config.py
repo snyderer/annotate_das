@@ -8,15 +8,15 @@ import numpy as np
 import os
 from pathlib import Path
 
-MODE = "debugging"
+# MODE = "debugging"
 # MODE = "training"
 # MODE = "skill_assessment"
-# MODE = "annotating"
+MODE = "annotating"
 
 # ============================================================================
 # Application defaults
 # ============================================================================
-DEFAULT_DATASET_PATH = r"D:/blue_whale"
+DEFAULT_DATASET_PATH = r"D:"
 
 DEFAULT_SAVE_PATH = str(
     Path.home()

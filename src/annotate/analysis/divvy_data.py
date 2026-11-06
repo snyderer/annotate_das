@@ -51,7 +51,7 @@ ANNOTATORS = [
 ]
 
 # Set this to False first if you want to inspect only the CSV manifests.
-COPY_FILES = False
+COPY_FILES = True
 
 # If True, existing copied files will be replaced.
 OVERWRITE_EXISTING = False
@@ -70,23 +70,23 @@ OVERLAP_SECONDS = 10 * 60  # 10 minutes
 DATASETS = [
     {
         "name": "Svalbard",
-        "source_dir": Path("/path/to/Svalbard"),
+        "source_dir": Path(r"U:\projects\2022_CLOCCB_OR_S1113\Svalbard\data"),
         "output_name": "Svalbard",
         "file_duration_seconds": 10,
         "expected_file_count": 1222,
-        "extensions": {".wav", ".flac", ".mp3", ".WAV", ".FLAC", ".MP3"},
+        "extensions": {".h5", ".hdf5"},
     },
     {
         "name": "OOI North C2",
-        "source_dir": Path("U:\projects\2022_CLOCCB_OR_S1113\OOI\DASData\OptaSense\North_C2"),
+        "source_dir": Path(r"U:\projects\2022_CLOCCB_OR_S1113\OOI\DASData\OptaSense\North_C2"),
         "output_name": "OOI_North_C2",
         "file_duration_seconds": 30,
         "expected_file_count": 255,
-        "extensions": {".wav", ".flac", ".mp3", ".WAV", ".FLAC", ".MP3"},
+        "extensions": {".h5", ".hdf5"},
     },
 ]
 
-OUTPUT_ROOT = Path("/path/to/annotation_assignments")
+OUTPUT_ROOT = Path(r"D:")
 
 
 # ---------------------------------------------------------------------

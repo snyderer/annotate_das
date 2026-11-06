@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import getpass
 from dataclasses import dataclass, field
 from pathlib import Path
+import os
 from annotate.config import MODE
 
+ANNOTATOR_DRIVES = {
+    "xd264": Path(r"E:\xd264"),
+    "ipf6": Path(r"D:\ipf6"),
+    "mmv52": Path(r"D:\mmv52"),
+    "ers334": Path(r"E:\xd264"),
+}
+
+current_user = getpass.getuser()
+base_drive = ANNOTATOR_DRIVES.get(current_user, Path(r"D:"))
 @dataclass(frozen=True)
 class DatasetProfile:
     key: str
@@ -226,16 +237,14 @@ elif MODE == "annotating":
         "svalbard": DatasetProfile(
             key="svalbard",
             display_name="Svalbard",
-            source_file=Path(
-                r"D:\testingData\Svalbard\data\120147.hdf5" # FIXME: Update to real Svalbard file path.
-            ),
+            source_file=Path(os.path.join(base_drive, r"Svalbard\090007.hdf5")),
             interrogator="asn",
             use_full_cable_length=False,
             cable_start_m=20_000.0,
             cable_end_m=100_000.0,
             target_dx_m=16.0,
-            duration_s=30.0,
-            navigation_step_s=15.0,
+            duration_s=35.0,
+            navigation_step_s=20.0,
             bandpass_enabled=True,
             f_lo_hz=5.0,
             f_hi_hz=90.0,
@@ -246,11 +255,7 @@ elif MODE == "annotating":
         "ooi_north_c2": DatasetProfile(
             key="ooi_north_c2",
             display_name="OOI North C2",
-            source_file=Path(
-                r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
-                r"\OptaSense\North_C2"
-                r"\North-C2-HF-P1kHz-GL30m-Sp2m-FS500Hz_2021-11-02T215901Z.h5"
-            ),
+            source_file=Path(os.path.join(base_drive, r"OOI_North_C2\North-C2-HF-P1kHz-GL30m-Sp2m-FS500Hz_2021-11-02T215231Z.h5")),
             interrogator="optasense",
             use_full_cable_length=True,
             cable_start_m=0,
@@ -265,65 +270,65 @@ elif MODE == "annotating":
             sound_speed_mps=1500.0,
         ),
 
-        "ooi_north_c3": DatasetProfile(
-            key="ooi_north_c3",
-            display_name="OOI North C3",
-            source_file=Path(
-                r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
-                r"\OptaSense\blue_whales_North_C3"
-                r"\North-C3-HF-P1kHz-GL30m-Sp2m_2021-11-02T140115Z.h5"
-            ),
-            interrogator="optasense",
-            use_full_cable_length=True,
-            cable_start_m=0,
-            cable_end_m=70_000.0,
-            target_dx_m=16.0,
-            duration_s=40.0,
-            navigation_step_s=25.0,
-            bandpass_enabled=True,
-            f_lo_hz=5.0,
-            f_hi_hz=90.0,
-            fk_filter_enabled=True,
-            sound_speed_mps=1500.0,
-        ),
+        # "ooi_north_c3": DatasetProfile(
+        #     key="ooi_north_c3",
+        #     display_name="OOI North C3",
+        #     source_file=Path(
+        #         r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
+        #         r"\OptaSense\blue_whales_North_C3"
+        #         r"\North-C3-HF-P1kHz-GL30m-Sp2m_2021-11-02T140115Z.h5"
+        #     ),
+        #     interrogator="optasense",
+        #     use_full_cable_length=True,
+        #     cable_start_m=0,
+        #     cable_end_m=70_000.0,
+        #     target_dx_m=16.0,
+        #     duration_s=40.0,
+        #     navigation_step_s=25.0,
+        #     bandpass_enabled=True,
+        #     f_lo_hz=5.0,
+        #     f_hi_hz=90.0,
+        #     fk_filter_enabled=True,
+        #     sound_speed_mps=1500.0,
+        # ),
 
-        "south_c1": DatasetProfile(
-            key="south_c1",
-            display_name="OOI South C1",
-            source_file=Path(
-                r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
-                r"\OptaSense\South_C1"
-                r"\South-C1-LR-95km-P1kHz-GL50m-SP2m-FS200Hz_2021-11-02T103714Z.h5"
-            ),
-            interrogator="optasense",
-            use_full_cable_length=True,
-            cable_start_m=20_000.0,
-            cable_end_m=95_000.0,
-            target_dx_m=16.0,
-            duration_s=40.0,
-            navigation_step_s=25.0,
-            sound_speed_mps=1500.0,
-        ),
+        # "south_c1": DatasetProfile(
+        #     key="south_c1",
+        #     display_name="OOI South C1",
+        #     source_file=Path(
+        #         r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
+        #         r"\OptaSense\South_C1"
+        #         r"\South-C1-LR-95km-P1kHz-GL50m-SP2m-FS200Hz_2021-11-02T103714Z.h5"
+        #     ),
+        #     interrogator="optasense",
+        #     use_full_cable_length=True,
+        #     cable_start_m=20_000.0,
+        #     cable_end_m=95_000.0,
+        #     target_dx_m=16.0,
+        #     duration_s=40.0,
+        #     navigation_step_s=25.0,
+        #     sound_speed_mps=1500.0,
+        # ),
 
-        "ooi_silixa": DatasetProfile(
-            key="ooi_silixa",
-            display_name="OOI Silixa",
-            source_file=Path(
-                r"C:\path\to\OOI\Silixa\example_file.tdms"
-            ),
-            # annotation_csv=Path(
-            #     r"C:\Users\ers334\Desktop\projects\labeling_2026"
-            #     r"\learning_annotations.csv"
-            # ),
-            interrogator="silixa",
-            use_full_cable_length=True,
-            cable_start_m=0.0,
-            cable_end_m=95_000.0,
-            target_dx_m=16.0,
-            duration_s=40.0,
-            navigation_step_s=25.0,
-            sound_speed_mps=1500.0,
-        ),
+        # "ooi_silixa": DatasetProfile(
+        #     key="ooi_silixa",
+        #     display_name="OOI Silixa",
+        #     source_file=Path(
+        #         r"C:\path\to\OOI\Silixa\example_file.tdms"
+        #     ),
+        #     # annotation_csv=Path(
+        #     #     r"C:\Users\ers334\Desktop\projects\labeling_2026"
+        #     #     r"\learning_annotations.csv"
+        #     # ),
+        #     interrogator="silixa",
+        #     use_full_cable_length=True,
+        #     cable_start_m=0.0,
+        #     cable_end_m=95_000.0,
+        #     target_dx_m=16.0,
+        #     duration_s=40.0,
+        #     navigation_step_s=25.0,
+        #     sound_speed_mps=1500.0,
+        # ),
 
         # "st_lawrence": DatasetProfile(
         #     key="st_lawrence",
