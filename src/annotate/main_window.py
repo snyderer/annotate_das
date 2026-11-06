@@ -41,6 +41,7 @@ from annotate.panels.text_display_panel import TextDisplayPanel
 from annotate.panels.tx_plot_panel import TXPlotPanel
 from annotate.dataset_profiles import DATASET_PROFILES, DatasetProfile
 from annotate.config import UserSettings
+from annotate.dataset_profiles import find_profile_source_file
 
 class MainWindow(QMainWindow):
     """
@@ -461,10 +462,13 @@ class MainWindow(QMainWindow):
         """
         profile = DATASET_PROFILES[profile_key]
 
-        if not profile.source_file.is_file():
+        source_file = find_profile_source_file(profile)
+
+        if source_file is None:
             self.statusBar().showMessage(
-                f"Profile source file does not exist: "
-                f"{profile.source_file}"
+                "No assigned DAS files were found for profile "
+                f"{profile.display_name}.\n"
+                f"Expected directory: {profile.source_dir}"
             )
             return
 
@@ -535,7 +539,7 @@ class MainWindow(QMainWindow):
             # If resume_time exists, the intended resume window is loaded below.
             # --------------------------------------------------------------
             self.data_manager.open_raw_dataset(
-                filepath=profile.source_file,
+                filepath=source_file,
                 settings=settings,
                 initial_start_time=initial_start_time,
             )
@@ -1160,7 +1164,7 @@ class MainWindow(QMainWindow):
 
         self.spectrogram_panel.update_plot(row_idx)
         self.tx_plot_panel.mark_distance(distance_m)
-        self.fx_plot_panel.mark_distance(distance_m)
+        # self.fx_plot_panel.mark_distance(distance_m)
 
         self.set_mode(self.MODE_NORMAL)
 
@@ -2512,6 +2516,7 @@ class MainWindow(QMainWindow):
         # Existing/pasted annotations may already have aggregate frequency
         # bounds. Show them as a guide without creating editable ROI boxes.
         self.show_frequency_box_for_annotation(first_idx)
+        self.fx_plot_panel.promote_frequency_annotation_box_to_editable()
 
         # Scroll relevant first thumbnail into view.
         if first_idx < len(self.fx_series_panel.plot_widgets):

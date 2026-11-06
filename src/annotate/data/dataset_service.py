@@ -259,6 +259,63 @@ class DatasetService:
         self._file_cache.clear()
         self._cached_bytes = 0
 
+    def next_available_time(
+        self,
+        requested_time: datetime,
+    ) -> datetime | None:
+        """
+        Return the start time of the first indexed file beginning at or after
+        requested_time.
+
+        Useful when an annotator's local assigned subset has a chronological
+        gap.
+        """
+        requested_time = self._as_utc(requested_time)
+
+        for record in self.file_records:
+            if record.end_time > requested_time:
+                # Requested time is inside this file.
+                if record.contains(requested_time):
+                    return requested_time
+
+                # Requested time is before this file begins.
+                if record.start_time >= requested_time:
+                    return record.start_time
+
+        return None
+    
+    def previous_available_time(
+        self,
+        requested_time: datetime,
+    ) -> datetime | None:
+        """
+        Return the latest known valid time at or before requested_time.
+
+        This is useful for backward navigation across an assignment gap.
+        """
+        requested_time = self._as_utc(requested_time)
+
+        previous_record: FileRecord | None = None
+
+        for record in self.file_records:
+            if record.contains(requested_time):
+                return requested_time
+
+            if record.start_time > requested_time:
+                break
+
+            previous_record = record
+
+        if previous_record is None:
+            return None
+
+        # Return a time safely inside the preceding file.
+        sample_margin_s = 1.0 / previous_record.fs_hz
+
+        return previous_record.end_time - timedelta(
+            seconds=sample_margin_s
+        )
+
     def open_dataset(
         self,
         selected_file: str | Path,

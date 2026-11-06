@@ -1,48 +1,62 @@
 """
-Split annotation datasets among interns with pairwise overlap.
+Create chunk-based DAS annotation assignments with context padding and
+pairwise inter-annotator overlap.
 
-For 3 annotators:
-    - A/B share one overlap segment
-    - A/C share one overlap segment
-    - B/C share one overlap segment
+Each annotator receives:
 
-Each pair gets OVERLAP_SECONDS of common data. This allows pairwise
-inter-annotator agreement / variance calculations.
+- Primary chunks:
+    Approximately 30-minute core regions assigned to one annotator.
 
-Files are assigned in approximately 30-minute chronological blocks so each
-annotator receives data from throughout the dataset rather than one contiguous
-third.
+- Pairwise overlap chunks:
+    Shared core regions assigned to exactly two annotators, allowing
+    inter-annotator agreement analysis.
 
-Output layout:
+Every chunk receives copied context before and after its core region.
 
-OUTPUT_ROOT/
-    manifests/
-        assignment_manifest.csv
+This avoids artificial data gaps within one GUI-opened chunk and allows
+calls near chunk boundaries to be viewed/annotated completely.
+
+Output layout
+-------------
+
+E:\
+    Svalbard\
+        chunk_primary_b000_f00\
+            *.hdf5
+            chunk_manifest.json
+        chunk_overlap_xd264__ipf6_b003\
+            *.hdf5
+            chunk_manifest.json
+
+I:\
+    ...
+
+M:\
+    ...
+
+A local manifest directory is also written beside this script:
+
+    divvy_manifests/
+        chunk_manifest.csv
         summary.csv
-    Alice/
-        Svalbard/
-            <copied files>
-        OOI_North_C2/
-            <copied files>
-    Bob/
-        ...
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import math
 import re
 import shutil
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from itertools import combinations
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------
+# ============================================================================
 # USER SETTINGS
-# ---------------------------------------------------------------------
+# ============================================================================
 
 ANNOTATORS = [
     "xd264",
@@ -50,27 +64,60 @@ ANNOTATORS = [
     "mmv52",
 ]
 
-# Set this to False first if you want to inspect only the CSV manifests.
-COPY_FILES = True
+# Physical destination roots for each annotator's drive.
+ANNOTATOR_OUTPUT_ROOTS: dict[str, Path] = {
+    "xd264": Path(r"E:"),
+    "ipf6": Path(r"I:"),
+    "mmv52": Path(r"M:"),
+}
 
-# If True, existing copied files will be replaced.
+# Start with False for a dry run. The script will still build manifests and
+# report estimated storage use, but it will not copy files.
+#
+# Change to True when you have reviewed the output.
+COPY_FILES = False
+
+# If False, existing destination files are retained. This makes interrupted
+# weekend copy jobs reasonably safe to resume by re-running the script.
 OVERWRITE_EXISTING = False
 
-# Target duration of a chronological assignment block.
+# If True, source files are copied with shutil.copy2().
+#
+# If False, hard links are attempted instead. Hard links only work if source
+# and destination are on the same NTFS volume, so keep this True for copying
+# from U: to E:/I:/M:.
+USE_HARDLINKS = False
+
+# Core target duration for normal chronological assignment blocks.
 BLOCK_SECONDS = 30 * 60  # 30 minutes
 
-# Pairwise overlap duration.
-# Each annotator participates in TWO pairwise overlap groups when there are
-# three annotators, but their main assignment is reduced so total workload
-# remains close to one-third + this amount.
+# Pairwise shared overlap duration.
 OVERLAP_SECONDS = 10 * 60  # 10 minutes
 
+# Extra data copied before and after every chunk's core assignment.
+#
+# Your normal plot duration is about 35-40 seconds. 60 seconds gives enough
+# room to inspect/label calls near artificial chunk boundaries.
+#
+# Increase to 90 or 120 seconds if calls may be long or if you want more
+# context for filter/F-K edge effects.
+CONTEXT_PADDING_SECONDS = 60
 
-# IMPORTANT: Change these paths to your actual source and output locations.
+# Manifest directory written on the machine running this script.
+# This is not placed on an intern drive by default.
+MANIFEST_ROOT = Path(__file__).resolve().parent / "divvy_manifests"
+
+
+# ============================================================================
+# DATASET SETTINGS
+# ============================================================================
+
 DATASETS = [
     {
         "name": "Svalbard",
-        "source_dir": Path(r"U:\projects\2022_CLOCCB_OR_S1113\Svalbard\data"),
+        "source_dir": Path(
+            r"U:\projects\2022_CLOCCB_OR_S1113\Svalbard\data"
+        ),
         "output_name": "Svalbard",
         "file_duration_seconds": 10,
         "expected_file_count": 1222,
@@ -78,7 +125,10 @@ DATASETS = [
     },
     {
         "name": "OOI North C2",
-        "source_dir": Path(r"U:\projects\2022_CLOCCB_OR_S1113\OOI\DASData\OptaSense\North_C2"),
+        "source_dir": Path(
+            r"U:\projects\2022_CLOCCB_OR_S1113\OOI\DASData"
+            r"\OptaSense\North_C2"
+        ),
         "output_name": "OOI_North_C2",
         "file_duration_seconds": 30,
         "expected_file_count": 255,
@@ -86,127 +136,208 @@ DATASETS = [
     },
 ]
 
-OUTPUT_ROOT = Path(r"D:")
 
-
-# ---------------------------------------------------------------------
+# ============================================================================
 # DATA STRUCTURES
-# ---------------------------------------------------------------------
+# ============================================================================
 
 @dataclass(frozen=True)
-class Assignment:
-    dataset: str
-    annotator: str
-    source_file: Path
-    relative_file: Path
-    role: str                 # "primary" or "overlap"
-    overlap_pair: str         # e.g. "Alice__Bob", blank for primary
-    chronological_block: int
-
-
-# ---------------------------------------------------------------------
-# FILE ORDERING
-# ---------------------------------------------------------------------
-
-def natural_sort_key(path: Path):
+class ChunkAssignment:
     """
-    Natural filename sorting.
+    One contiguous core assignment plus copied context on one annotator drive.
 
-    This is suitable if filenames contain sortable timestamps or sequence
-    numbers, such as:
-        recording_0001.wav
-        recording_0002.wav
-        2024-01-01T12-00-00.wav
+    core_indices:
+        File indices the annotator is responsible for labeling.
 
-    If your filenames are NOT chronological when sorted alphabetically,
-    replace this function with timestamp extraction from your filename format.
+    copied_indices:
+        core_indices plus before/after contextual padding.
+    """
+
+    dataset: str
+    dataset_output_name: str
+    annotator: str
+
+    chunk_id: str
+
+    role: str
+    overlap_pair: str
+
+    chronological_block: int
+    fragment_index: int
+
+    source_dir: Path
+    files: tuple[Path, ...]
+
+    core_indices: tuple[int, ...]
+    copied_indices: tuple[int, ...]
+
+    file_duration_seconds: float
+    context_padding_seconds: float
+
+    @property
+    def core_start_index(self) -> int:
+        return min(self.core_indices)
+
+    @property
+    def core_end_index(self) -> int:
+        return max(self.core_indices)
+
+    @property
+    def copied_start_index(self) -> int:
+        return min(self.copied_indices)
+
+    @property
+    def copied_end_index(self) -> int:
+        return max(self.copied_indices)
+
+
+# ============================================================================
+# FILE ORDERING
+# ============================================================================
+
+def natural_sort_key(path: Path) -> list[object]:
+    """
+    Natural filename sort key.
+
+    Suitable for names such as:
+        090007.hdf5
+        120107.hdf5
+        recording_0001.h5
+        2021-11-02T215901Z.h5
+
+    Verify that sorted output matches chronological acquisition order before
+    using this on unfamiliar DAS datasets.
     """
     return [
         int(part) if part.isdigit() else part.lower()
-        for part in re.split(r"([0-9]+)", str(path))
+        for part in re.split(r"([0-9]+)", path.name)
     ]
 
 
-def find_files(source_dir: Path, extensions: set[str]) -> list[Path]:
-    """Recursively find audio/data files and sort them chronologically."""
+def find_files(
+    source_dir: Path,
+    extensions: set[str],
+) -> list[Path]:
+    """Find supported source files recursively and sort naturally."""
+    extensions = {
+        extension.lower()
+        for extension in extensions
+    }
+
     files = [
-        p for p in source_dir.rglob("*")
-        if p.is_file() and p.suffix in extensions
+        path
+        for path in source_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in extensions
     ]
-    return sorted(files, key=natural_sort_key)
+
+    return sorted(
+        files,
+        key=natural_sort_key,
+    )
 
 
-# ---------------------------------------------------------------------
+# ============================================================================
 # ASSIGNMENT LOGIC
-# ---------------------------------------------------------------------
+# ============================================================================
 
-def make_blocks(files: list[Path], file_duration_seconds: int) -> list[list[int]]:
+def make_blocks(
+    files: list[Path],
+    file_duration_seconds: float,
+) -> list[list[int]]:
     """
-    Divide file indices into approximately BLOCK_SECONDS-long chronological
-    blocks.
+    Divide source-file indices into approximately BLOCK_SECONDS chunks.
     """
-    files_per_block = max(1, BLOCK_SECONDS // file_duration_seconds)
+    files_per_block = max(
+        1,
+        int(BLOCK_SECONDS // file_duration_seconds),
+    )
 
     return [
-        list(range(start, min(start + files_per_block, len(files))))
-        for start in range(0, len(files), files_per_block)
+        list(
+            range(
+                start,
+                min(
+                    start + files_per_block,
+                    len(files),
+                ),
+            )
+        )
+        for start in range(
+            0,
+            len(files),
+            files_per_block,
+        )
     ]
 
 
 def select_pairwise_overlap_indices(
+    *,
     files: list[Path],
     blocks: list[list[int]],
-    file_duration_seconds: int,
+    file_duration_seconds: float,
     annotators: list[str],
 ) -> dict[tuple[str, str], list[int]]:
     """
-    Select one overlap region for every annotator pair.
+    Select one contiguous overlap region for every annotator pair.
 
-    For three annotators and a 10-minute overlap:
-        Alice/Bob get 10 min in common
-        Alice/Charlie get 10 min in common
-        Bob/Charlie get 10 min in common
+    With three annotators:
 
-    Regions are selected from different points in the dataset where possible,
-    so overlap samples are temporally distributed.
+        xd264/ipf6
+        xd264/mmv52
+        ipf6/mmv52
+
+    each receives one common overlap segment of OVERLAP_SECONDS.
     """
-    overlap_files = math.ceil(OVERLAP_SECONDS / file_duration_seconds)
-    pairs = list(combinations(annotators, 2))
+    overlap_files = math.ceil(
+        OVERLAP_SECONDS / file_duration_seconds
+    )
 
-    required = overlap_files * len(pairs)
-    if required >= len(files):
+    pairs = list(
+        combinations(
+            annotators,
+            2,
+        )
+    )
+
+    required_files = overlap_files * len(pairs)
+
+    if required_files >= len(files):
         raise ValueError(
-            f"Dataset has only {len(files)} files, but pairwise overlap requires "
-            f"{required} files. Reduce OVERLAP_SECONDS or use fewer annotators."
+            f"Dataset has {len(files)} files, but pairwise overlap "
+            f"requires at least {required_files} files. Reduce "
+            "OVERLAP_SECONDS or use fewer annotators."
         )
 
     result: dict[tuple[str, str], list[int]] = {}
     used_indices: set[int] = set()
 
-    # Spread overlap regions across the recording duration.
-    # For 3 pairs, roughly select early / middle / late blocks.
+    # Spread overlap regions across the dataset approximately early/middle/late.
     candidate_block_positions = [
-        round(i * (len(blocks) - 1) / max(1, len(pairs) - 1))
+        round(
+            i * (len(blocks) - 1)
+            / max(1, len(pairs) - 1)
+        )
         for i in range(len(pairs))
     ]
 
     for pair_number, pair in enumerate(pairs):
         preferred_block_index = candidate_block_positions[pair_number]
 
-        # Search preferred block first, then nearby blocks.
         search_order = sorted(
             range(len(blocks)),
-            key=lambda i: abs(i - preferred_block_index),
+            key=lambda index: abs(
+                index - preferred_block_index
+            ),
         )
 
-        chosen_indices = None
+        chosen_indices: list[int] | None = None
 
         for block_index in search_order:
             block = blocks[block_index]
 
-            # Find contiguous available files in the block.
-            available_runs = []
-            current_run = []
+            available_runs: list[list[int]] = []
+            current_run: list[int] = []
 
             for file_index in block:
                 if file_index not in used_indices:
@@ -220,19 +351,27 @@ def select_pairwise_overlap_indices(
                 available_runs.append(current_run)
 
             for run in available_runs:
-                if len(run) >= overlap_files:
-                    # Center the overlap subsection in this available run.
-                    start = (len(run) - overlap_files) // 2
-                    chosen_indices = run[start:start + overlap_files]
-                    break
+                if len(run) < overlap_files:
+                    continue
+
+                # Choose a centered contiguous portion of this run.
+                run_start = (
+                    len(run) - overlap_files
+                ) // 2
+
+                chosen_indices = run[
+                    run_start:run_start + overlap_files
+                ]
+
+                break
 
             if chosen_indices is not None:
                 break
 
         if chosen_indices is None:
             raise RuntimeError(
-                f"Could not find {overlap_files} contiguous files for overlap "
-                f"pair {pair}."
+                f"Could not find a contiguous {OVERLAP_SECONDS}-second "
+                f"overlap region for pair {pair}."
             )
 
         result[pair] = chosen_indices
@@ -241,30 +380,38 @@ def select_pairwise_overlap_indices(
     return result
 
 
-def assign_primary_files(
-    files: list[Path],
+def assign_primary_fragments(
+    *,
     blocks: list[list[int]],
     excluded_indices: set[int],
     annotators: list[str],
-) -> dict[str, list[tuple[int, int]]]:
+) -> list[tuple[str, int, int, list[int]]]:
     """
-    Assign all non-overlap files to annotators.
+    Assign each non-overlap contiguous fragment to one annotator.
 
-    Assignment is performed in chronological block fragments. The annotator
-    with the currently smallest primary-file count receives the next fragment.
+    Returns tuples:
 
-    This gives reasonably balanced workload while distributing recording time
-    among annotators.
+        annotator,
+        chronological_block,
+        fragment_index,
+        core_file_indices
+
+    Keeping fragments separate produces physically contiguous chunk folders.
     """
-    assignments: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    primary_counts: dict[str, int] = {name: 0 for name in annotators}
+    primary_counts: dict[str, int] = {
+        annotator: 0
+        for annotator in annotators
+    }
+
+    assignments: list[
+        tuple[str, int, int, list[int]]
+    ] = []
 
     tie_breaker_position = 0
 
     for block_number, block in enumerate(blocks):
-        # Split a block into contiguous pieces around excluded overlap files.
-        fragments = []
-        current_fragment = []
+        fragments: list[list[int]] = []
+        current_fragment: list[int] = []
 
         for file_index in block:
             if file_index in excluded_indices:
@@ -277,54 +424,130 @@ def assign_primary_files(
         if current_fragment:
             fragments.append(current_fragment)
 
-        for fragment in fragments:
+        for fragment_index, fragment in enumerate(fragments):
             if not fragment:
                 continue
 
-            # Choose least-loaded annotator.
-            min_count = min(primary_counts.values())
+            min_count = min(
+                primary_counts.values()
+            )
+
             candidates = [
-                a for a in annotators
-                if primary_counts[a] == min_count
+                annotator
+                for annotator in annotators
+                if primary_counts[annotator] == min_count
             ]
 
-            # Rotate ties so the same person does not always win.
-            annotator = candidates[tie_breaker_position % len(candidates)]
+            annotator = candidates[
+                tie_breaker_position % len(candidates)
+            ]
+
             tie_breaker_position += 1
 
-            for file_index in fragment:
-                assignments[annotator].append((file_index, block_number))
+            assignments.append((
+                annotator,
+                block_number,
+                fragment_index,
+                fragment,
+            ))
 
             primary_counts[annotator] += len(fragment)
 
     return assignments
 
 
-def build_assignments_for_dataset(dataset: dict) -> list[Assignment]:
-    """Create all primary and overlap assignments for one dataset."""
-    source_dir = dataset["source_dir"]
-    files = find_files(source_dir, dataset["extensions"])
+def padded_indices(
+    *,
+    core_indices: list[int],
+    total_files: int,
+    file_duration_seconds: float,
+    padding_seconds: float,
+) -> list[int]:
+    """
+    Return contiguous copied-file indices for a core assignment plus context.
+    """
+    if not core_indices:
+        return []
+
+    padding_files = math.ceil(
+        padding_seconds / file_duration_seconds
+    )
+
+    copied_start = max(
+        0,
+        min(core_indices) - padding_files,
+    )
+
+    copied_end = min(
+        total_files - 1,
+        max(core_indices) + padding_files,
+    )
+
+    return list(
+        range(
+            copied_start,
+            copied_end + 1,
+        )
+    )
+
+
+def find_block_number_for_index(
+    *,
+    blocks: list[list[int]],
+    file_index: int,
+) -> int:
+    """Return chronological block containing one source-file index."""
+    for block_number, block in enumerate(blocks):
+        if file_index in block:
+            return block_number
+
+    raise KeyError(
+        f"Could not find block for file index {file_index}."
+    )
+
+
+def build_chunk_assignments_for_dataset(
+    dataset: dict,
+) -> list[ChunkAssignment]:
+    """
+    Create primary and pairwise-overlap chunk assignments for one dataset.
+    """
+    source_dir = Path(dataset["source_dir"])
+    files = find_files(
+        source_dir,
+        dataset["extensions"],
+    )
 
     if not files:
         raise FileNotFoundError(
-            f"No matching files found in: {source_dir}\n"
+            f"No matching files found in:\n{source_dir}\n"
             f"Extensions searched: {dataset['extensions']}"
         )
 
     expected_count = dataset.get("expected_file_count")
-    if expected_count is not None and len(files) != expected_count:
+
+    if (
+        expected_count is not None
+        and len(files) != expected_count
+    ):
         print(
-            f"WARNING: {dataset['name']} expected {expected_count} files "
-            f"but found {len(files)} files."
+            f"WARNING: {dataset['name']} expected "
+            f"{expected_count} files but found {len(files)}."
         )
 
-    file_duration = dataset["file_duration_seconds"]
-    blocks = make_blocks(files, file_duration)
+    file_duration_seconds = float(
+        dataset["file_duration_seconds"]
+    )
+
+    blocks = make_blocks(
+        files,
+        file_duration_seconds,
+    )
 
     overlap_by_pair = select_pairwise_overlap_indices(
         files=files,
         blocks=blocks,
-        file_duration_seconds=file_duration,
+        file_duration_seconds=file_duration_seconds,
         annotators=ANNOTATORS,
     )
 
@@ -334,218 +557,714 @@ def build_assignments_for_dataset(dataset: dict) -> list[Assignment]:
         for index in indices
     }
 
-    primary_by_annotator = assign_primary_files(
-        files=files,
+    primary_fragments = assign_primary_fragments(
         blocks=blocks,
         excluded_indices=excluded_indices,
         annotators=ANNOTATORS,
     )
 
-    assignments: list[Assignment] = []
+    assignments: list[ChunkAssignment] = []
 
-    # Lookup chronological block for each file.
-    file_to_block = {}
-    for block_number, block in enumerate(blocks):
-        for file_index in block:
-            file_to_block[file_index] = block_number
+    # ------------------------------------------------------------------
+    # Primary chunks.
+    # ------------------------------------------------------------------
+    for (
+        annotator,
+        block_number,
+        fragment_index,
+        core_indices,
+    ) in primary_fragments:
 
-    # Add normal, non-overlap assignments.
-    for annotator, file_entries in primary_by_annotator.items():
-        for file_index, block_number in file_entries:
-            source_file = files[file_index]
-            assignments.append(
-                Assignment(
-                    dataset=dataset["name"],
-                    annotator=annotator,
-                    source_file=source_file,
-                    relative_file=source_file.relative_to(source_dir),
-                    role="primary",
-                    overlap_pair="",
-                    chronological_block=block_number,
-                )
+        copied = padded_indices(
+            core_indices=core_indices,
+            total_files=len(files),
+            file_duration_seconds=file_duration_seconds,
+            padding_seconds=CONTEXT_PADDING_SECONDS,
+        )
+
+        chunk_id = (
+            f"chunk_primary_b{block_number:03d}"
+            f"_f{fragment_index:02d}"
+        )
+
+        assignments.append(
+            ChunkAssignment(
+                dataset=dataset["name"],
+                dataset_output_name=dataset["output_name"],
+                annotator=annotator,
+                chunk_id=chunk_id,
+                role="primary",
+                overlap_pair="",
+                chronological_block=block_number,
+                fragment_index=fragment_index,
+                source_dir=source_dir,
+                files=tuple(files),
+                core_indices=tuple(core_indices),
+                copied_indices=tuple(copied),
+                file_duration_seconds=file_duration_seconds,
+                context_padding_seconds=CONTEXT_PADDING_SECONDS,
             )
+        )
 
-    # Add pairwise overlap assignments.
-    for pair, indices in overlap_by_pair.items():
+    # ------------------------------------------------------------------
+    # Pairwise overlap chunks.
+    # ------------------------------------------------------------------
+    for pair, core_indices in overlap_by_pair.items():
         pair_label = "__".join(pair)
 
+        block_number = find_block_number_for_index(
+            blocks=blocks,
+            file_index=core_indices[0],
+        )
+
+        copied = padded_indices(
+            core_indices=core_indices,
+            total_files=len(files),
+            file_duration_seconds=file_duration_seconds,
+            padding_seconds=CONTEXT_PADDING_SECONDS,
+        )
+
+        chunk_id = (
+            f"chunk_overlap_{pair_label}"
+            f"_b{block_number:03d}"
+        )
+
         for annotator in pair:
-            for file_index in indices:
-                source_file = files[file_index]
-                assignments.append(
-                    Assignment(
-                        dataset=dataset["name"],
-                        annotator=annotator,
-                        source_file=source_file,
-                        relative_file=source_file.relative_to(source_dir),
-                        role="overlap",
-                        overlap_pair=pair_label,
-                        chronological_block=file_to_block[file_index],
-                    )
+            assignments.append(
+                ChunkAssignment(
+                    dataset=dataset["name"],
+                    dataset_output_name=dataset["output_name"],
+                    annotator=annotator,
+                    chunk_id=chunk_id,
+                    role="overlap",
+                    overlap_pair=pair_label,
+                    chronological_block=block_number,
+                    fragment_index=0,
+                    source_dir=source_dir,
+                    files=tuple(files),
+                    core_indices=tuple(core_indices),
+                    copied_indices=tuple(copied),
+                    file_duration_seconds=file_duration_seconds,
+                    context_padding_seconds=CONTEXT_PADDING_SECONDS,
                 )
+            )
 
     return assignments
 
 
-# ---------------------------------------------------------------------
-# OUTPUT / COPYING
-# ---------------------------------------------------------------------
+# ============================================================================
+# OUTPUT / MANIFESTS
+# ============================================================================
 
-def write_manifest(assignments: list[Assignment]) -> None:
-    """Write a detailed file-level assignment manifest."""
-    manifest_dir = OUTPUT_ROOT / "manifests"
-    manifest_dir.mkdir(parents=True, exist_ok=True)
+def chunk_destination(
+    assignment: ChunkAssignment,
+) -> Path:
+    """Return output folder for one chunk assignment."""
+    output_root = ANNOTATOR_OUTPUT_ROOTS[
+        assignment.annotator
+    ]
 
-    manifest_path = manifest_dir / "assignment_manifest.csv"
+    return (
+        output_root
+        / assignment.dataset_output_name
+        / assignment.chunk_id
+    )
 
-    with manifest_path.open("w", newline="", encoding="utf-8") as f:
+
+def chunk_manifest_data(
+    assignment: ChunkAssignment,
+) -> dict:
+    """
+    Return serializable chunk metadata.
+
+    This records responsibility boundaries separately from copied context.
+    """
+    files = assignment.files
+
+    return {
+        "dataset": assignment.dataset,
+        "dataset_output_name": assignment.dataset_output_name,
+        "annotator": assignment.annotator,
+
+        "chunk_id": assignment.chunk_id,
+        "role": assignment.role,
+        "overlap_pair": assignment.overlap_pair,
+
+        "chronological_block": assignment.chronological_block,
+        "fragment_index": assignment.fragment_index,
+
+        "file_duration_seconds": assignment.file_duration_seconds,
+        "context_padding_seconds": assignment.context_padding_seconds,
+
+        "core_start_index": assignment.core_start_index,
+        "core_end_index": assignment.core_end_index,
+        "core_file_count": len(assignment.core_indices),
+
+        "copied_start_index": assignment.copied_start_index,
+        "copied_end_index": assignment.copied_end_index,
+        "copied_file_count": len(assignment.copied_indices),
+
+        "core_first_file": files[
+            assignment.core_start_index
+        ].name,
+        "core_last_file": files[
+            assignment.core_end_index
+        ].name,
+
+        "copied_first_file": files[
+            assignment.copied_start_index
+        ].name,
+        "copied_last_file": files[
+            assignment.copied_end_index
+        ].name,
+
+        # File names only, because copied chunk folders are intentionally flat.
+        "core_files": [
+            files[index].name
+            for index in assignment.core_indices
+        ],
+
+        "copied_files": [
+            files[index].name
+            for index in assignment.copied_indices
+        ],
+    }
+
+
+def write_global_chunk_manifest(
+    assignments: list[ChunkAssignment],
+) -> None:
+    """Write one row per chunk assignment."""
+    MANIFEST_ROOT.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    manifest_path = (
+        MANIFEST_ROOT
+        / "chunk_manifest.csv"
+    )
+
+    fieldnames = [
+        "dataset",
+        "dataset_output_name",
+        "annotator",
+        "chunk_id",
+        "role",
+        "overlap_pair",
+        "chronological_block",
+        "fragment_index",
+        "file_duration_seconds",
+        "context_padding_seconds",
+        "core_start_index",
+        "core_end_index",
+        "core_file_count",
+        "copied_start_index",
+        "copied_end_index",
+        "copied_file_count",
+        "core_first_file",
+        "core_last_file",
+        "copied_first_file",
+        "copied_last_file",
+        "destination",
+    ]
+
+    with manifest_path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
         writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "dataset",
-                "annotator",
-                "role",
-                "overlap_pair",
-                "chronological_block",
-                "source_file",
-                "relative_file",
-            ],
+            file,
+            fieldnames=fieldnames,
         )
+
         writer.writeheader()
 
         for assignment in sorted(
             assignments,
-            key=lambda a: (
-                a.dataset,
-                a.annotator,
-                a.chronological_block,
-                str(a.source_file),
+            key=lambda item: (
+                item.dataset,
+                item.annotator,
+                item.chronological_block,
+                item.chunk_id,
             ),
         ):
-            writer.writerow(
-                {
-                    "dataset": assignment.dataset,
-                    "annotator": assignment.annotator,
-                    "role": assignment.role,
-                    "overlap_pair": assignment.overlap_pair,
-                    "chronological_block": assignment.chronological_block,
-                    "source_file": str(assignment.source_file),
-                    "relative_file": str(assignment.relative_file),
-                }
+            metadata = chunk_manifest_data(
+                assignment
             )
 
-    print(f"Wrote manifest: {manifest_path}")
+            writer.writerow({
+                key: metadata.get(key, "")
+                for key in fieldnames
+                if key != "destination"
+            } | {
+                "destination": str(
+                    chunk_destination(assignment)
+                )
+            })
+
+    print(
+        f"Wrote global chunk manifest:\n"
+        f"  {manifest_path}"
+    )
 
 
-def write_summary(assignments: list[Assignment], datasets: list[dict]) -> None:
-    """Write workload summary by dataset and annotator."""
-    dataset_duration_lookup = {
-        d["name"]: d["file_duration_seconds"]
-        for d in datasets
-    }
+def write_summary(
+    assignments: list[ChunkAssignment],
+) -> None:
+    """Write core/context workload summary."""
+    MANIFEST_ROOT.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    summary_path = MANIFEST_ROOT / "summary.csv"
+
+    counts = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(float)
+        )
+    )
 
     for assignment in assignments:
-        counts[assignment.dataset][assignment.annotator][assignment.role] += 1
+        duration = assignment.file_duration_seconds
 
-    summary_path = OUTPUT_ROOT / "manifests" / "summary.csv"
+        counts[
+            assignment.dataset
+        ][
+            assignment.annotator
+        ][
+            f"{assignment.role}_core_files"
+        ] += len(assignment.core_indices)
 
-    with summary_path.open("w", newline="", encoding="utf-8") as f:
+        counts[
+            assignment.dataset
+        ][
+            assignment.annotator
+        ][
+            f"{assignment.role}_copied_files"
+        ] += len(assignment.copied_indices)
+
+        counts[
+            assignment.dataset
+        ][
+            assignment.annotator
+        ][
+            f"{assignment.role}_core_seconds"
+        ] += len(assignment.core_indices) * duration
+
+    fieldnames = [
+        "dataset",
+        "annotator",
+
+        "primary_core_files",
+        "primary_copied_files",
+        "primary_core_hours",
+
+        "overlap_core_files",
+        "overlap_copied_files",
+        "overlap_core_hours",
+
+        "total_core_hours",
+        "chunk_count",
+    ]
+
+    with summary_path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
         writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "dataset",
-                "annotator",
-                "primary_files",
-                "overlap_files",
-                "total_files",
-                "primary_hours",
-                "overlap_hours",
-                "total_hours",
-            ],
+            file,
+            fieldnames=fieldnames,
         )
+
         writer.writeheader()
 
         for dataset_name in sorted(counts):
-            duration = dataset_duration_lookup[dataset_name]
-
             for annotator in ANNOTATORS:
-                primary = counts[dataset_name][annotator]["primary"]
-                overlap = counts[dataset_name][annotator]["overlap"]
-                total = primary + overlap
+                values = counts[dataset_name][annotator]
 
-                writer.writerow(
-                    {
-                        "dataset": dataset_name,
-                        "annotator": annotator,
-                        "primary_files": primary,
-                        "overlap_files": overlap,
-                        "total_files": total,
-                        "primary_hours": round(primary * duration / 3600, 4),
-                        "overlap_hours": round(overlap * duration / 3600, 4),
-                        "total_hours": round(total * duration / 3600, 4),
-                    }
+                primary_core_files = int(
+                    values["primary_core_files"]
+                )
+                primary_copied_files = int(
+                    values["primary_copied_files"]
                 )
 
-    print(f"Wrote summary:  {summary_path}")
+                overlap_core_files = int(
+                    values["overlap_core_files"]
+                )
+                overlap_copied_files = int(
+                    values["overlap_copied_files"]
+                )
+
+                primary_core_hours = (
+                    values["primary_core_seconds"]
+                    / 3600.0
+                )
+
+                overlap_core_hours = (
+                    values["overlap_core_seconds"]
+                    / 3600.0
+                )
+
+                chunk_count = sum(
+                    1
+                    for assignment in assignments
+                    if (
+                        assignment.dataset == dataset_name
+                        and assignment.annotator == annotator
+                    )
+                )
+
+                writer.writerow({
+                    "dataset": dataset_name,
+                    "annotator": annotator,
+
+                    "primary_core_files": primary_core_files,
+                    "primary_copied_files": primary_copied_files,
+                    "primary_core_hours": round(
+                        primary_core_hours,
+                        4,
+                    ),
+
+                    "overlap_core_files": overlap_core_files,
+                    "overlap_copied_files": overlap_copied_files,
+                    "overlap_core_hours": round(
+                        overlap_core_hours,
+                        4,
+                    ),
+
+                    "total_core_hours": round(
+                        primary_core_hours
+                        + overlap_core_hours,
+                        4,
+                    ),
+
+                    "chunk_count": chunk_count,
+                })
+
+    print(
+        f"Wrote summary:\n"
+        f"  {summary_path}"
+    )
 
 
-def copy_assignment_files(assignments: list[Assignment], datasets: list[dict]) -> None:
-    """Copy files into per-annotator/per-dataset directories."""
-    dataset_output_names = {
-        d["name"]: d["output_name"]
-        for d in datasets
-    }
+def write_chunk_manifest(
+    assignment: ChunkAssignment,
+    destination_dir: Path,
+) -> None:
+    """Write one JSON manifest inside a destination chunk folder."""
+    manifest_path = (
+        destination_dir
+        / "chunk_manifest.json"
+    )
 
-    for assignment in assignments:
-        destination = (
-            OUTPUT_ROOT
-            / assignment.annotator
-            / dataset_output_names[assignment.dataset]
-            / assignment.relative_file
+    metadata = chunk_manifest_data(
+        assignment
+    )
+
+    metadata["destination_dir"] = str(
+        destination_dir
+    )
+
+    with manifest_path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            metadata,
+            file,
+            indent=2,
         )
 
-        destination.parent.mkdir(parents=True, exist_ok=True)
 
-        if destination.exists() and not OVERWRITE_EXISTING:
+# ============================================================================
+# COPY / PREFLIGHT
+# ============================================================================
+
+def estimate_storage_by_annotator(
+    assignments: list[ChunkAssignment],
+) -> dict[str, int]:
+    """
+    Estimate copied bytes per annotator.
+
+    This intentionally counts duplicated context files once per chunk because
+    each chunk has its own physical folder.
+    """
+    totals: dict[str, int] = defaultdict(int)
+
+    for assignment in assignments:
+        for index in assignment.copied_indices:
+            totals[
+                assignment.annotator
+            ] += assignment.files[index].stat().st_size
+
+    return dict(totals)
+
+
+def print_preflight(
+    assignments: list[ChunkAssignment],
+) -> None:
+    """Print estimated copy volume and available drive space."""
+    estimated_bytes = estimate_storage_by_annotator(
+        assignments
+    )
+
+    print("\n" + "=" * 72)
+    print("COPY PREFLIGHT")
+    print("=" * 72)
+
+    for annotator in ANNOTATORS:
+        output_root = ANNOTATOR_OUTPUT_ROOTS[annotator]
+
+        required_bytes = estimated_bytes.get(
+            annotator,
+            0,
+        )
+
+        print(
+            f"\nAnnotator: {annotator}\n"
+            f"Destination: {output_root}\n"
+            f"Estimated copied data: "
+            f"{required_bytes / (1024 ** 3):.2f} GiB"
+        )
+
+        if not output_root.exists():
+            print(
+                "WARNING: destination drive/path does not exist."
+            )
             continue
 
-        shutil.copy2(assignment.source_file, destination)
+        try:
+            free_bytes = shutil.disk_usage(
+                output_root
+            ).free
 
-    print(f"Copied files under: {OUTPUT_ROOT}")
+            print(
+                f"Available free space: "
+                f"{free_bytes / (1024 ** 3):.2f} GiB"
+            )
+
+            if free_bytes < required_bytes:
+                print(
+                    "WARNING: insufficient estimated free space."
+                )
+
+        except OSError as exc:
+            print(
+                f"WARNING: could not inspect free space: {exc}"
+            )
+
+    print("\n" + "=" * 72)
 
 
-# ---------------------------------------------------------------------
+def copy_one_file(
+    source: Path,
+    destination: Path,
+) -> None:
+    """Copy one source file, optionally using a hard link."""
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    if destination.exists():
+        if not OVERWRITE_EXISTING:
+            return
+
+        destination.unlink()
+
+    if USE_HARDLINKS:
+        try:
+            destination.hardlink_to(source)
+            return
+        except OSError:
+            # Expected when source/destination are on different drives.
+            pass
+
+    shutil.copy2(
+        source,
+        destination,
+    )
+
+
+def copy_chunk(
+    assignment: ChunkAssignment,
+) -> None:
+    """
+    Copy all core/context files for one chunk and write its JSON manifest.
+
+    Files are intentionally copied directly into the chunk directory rather
+    than preserving source nested folder structure. DatasetService currently
+    searches only directly inside the selected dataset directory.
+    """
+    destination_dir = chunk_destination(
+        assignment
+    )
+
+    destination_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    source_names_seen: set[str] = set()
+
+    for index in assignment.copied_indices:
+        source_file = assignment.files[index]
+
+        # A flat destination is intentional. Detect duplicate basenames rather
+        # than silently overwriting unrelated source files.
+        if source_file.name in source_names_seen:
+            raise RuntimeError(
+                "Duplicate source filename within chunk: "
+                f"{source_file.name}"
+            )
+
+        source_names_seen.add(
+            source_file.name
+        )
+
+        destination_file = (
+            destination_dir
+            / source_file.name
+        )
+
+        copy_one_file(
+            source_file,
+            destination_file,
+        )
+
+    write_chunk_manifest(
+        assignment,
+        destination_dir,
+    )
+
+
+def copy_all_chunks(
+    assignments: list[ChunkAssignment],
+) -> None:
+    """Copy every assigned chunk to its annotator-specific drive."""
+    total_chunks = len(assignments)
+
+    for number, assignment in enumerate(
+        sorted(
+            assignments,
+            key=lambda item: (
+                item.annotator,
+                item.dataset,
+                item.chronological_block,
+                item.chunk_id,
+            ),
+        ),
+        start=1,
+    ):
+        destination_dir = chunk_destination(
+            assignment
+        )
+
+        print(
+            f"[{number}/{total_chunks}] "
+            f"{assignment.annotator} | "
+            f"{assignment.dataset_output_name} | "
+            f"{assignment.chunk_id}\n"
+            f"  Core: "
+            f"{len(assignment.core_indices)} files | "
+            f"Copied with context: "
+            f"{len(assignment.copied_indices)} files\n"
+            f"  Destination: {destination_dir}"
+        )
+
+        copy_chunk(assignment)
+
+    print("\nFinished copying all chunk assignments.")
+
+
+# ============================================================================
 # MAIN
-# ---------------------------------------------------------------------
+# ============================================================================
 
-def main():
+def validate_configuration() -> None:
+    """Validate annotator names and destination-drive mappings."""
+    missing = [
+        annotator
+        for annotator in ANNOTATORS
+        if annotator not in ANNOTATOR_OUTPUT_ROOTS
+    ]
+
+    if missing:
+        raise ValueError(
+            "Missing destination roots for annotators: "
+            f"{missing}"
+        )
+
     if len(ANNOTATORS) < 2:
-        raise ValueError("You need at least two annotators.")
+        raise ValueError(
+            "At least two annotators are required."
+        )
+
+
+def main() -> None:
+    validate_configuration()
 
     if len(ANNOTATORS) != 3:
         print(
-            "NOTE: This script works with any number of annotators, but the "
-            "workload assumptions in your table appear to be based on 3."
+            "NOTE: The code supports other annotator counts, but current "
+            "workload assumptions are designed around three annotators."
         )
 
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-
-    all_assignments: list[Assignment] = []
+    all_assignments: list[ChunkAssignment] = []
 
     for dataset in DATASETS:
-        print(f"\nProcessing: {dataset['name']}")
-        dataset_assignments = build_assignments_for_dataset(dataset)
-        all_assignments.extend(dataset_assignments)
+        print(
+            "\n"
+            + "=" * 72
+            + "\n"
+            + f"Building assignments: {dataset['name']}\n"
+            + "=" * 72
+        )
 
-    write_manifest(all_assignments)
-    write_summary(all_assignments, DATASETS)
+        dataset_assignments = (
+            build_chunk_assignments_for_dataset(
+                dataset
+            )
+        )
 
-    if COPY_FILES:
-        copy_assignment_files(all_assignments, DATASETS)
-    else:
-        print("\nCOPY_FILES = False; no files were copied.")
+        all_assignments.extend(
+            dataset_assignments
+        )
+
+        print(
+            f"Created {len(dataset_assignments)} chunk assignments "
+            f"for {dataset['name']}."
+        )
+
+    write_global_chunk_manifest(
+        all_assignments
+    )
+
+    write_summary(
+        all_assignments
+    )
+
+    print_preflight(
+        all_assignments
+    )
+
+    if not COPY_FILES:
+        print(
+            "\nCOPY_FILES = False.\n"
+            "No DAS files were copied.\n"
+            "Review divvy_manifests/chunk_manifest.csv and summary.csv, "
+            "then change COPY_FILES to True."
+        )
+        return
+
+    copy_all_chunks(
+        all_assignments
+    )
 
 
 if __name__ == "__main__":

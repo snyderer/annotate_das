@@ -9,6 +9,63 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
 from annotate.config import PLOTCOLOR_LUT
 
+# editable FX ROI function
+class FXAnnotationViewBox(pg.ViewBox):
+    """
+    ViewBox that emits F-X plot-coordinate drag events while F-X ROI annotation
+    mode is active.
+
+    Normal panning/zooming behavior remains unchanged outside fx_boxes mode.
+    """
+
+    box_drag_started = pyqtSignal(float, float)
+    box_dragged = pyqtSignal(float, float)
+    box_drag_finished = pyqtSignal(float, float)
+
+    def __init__(self, panel, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.panel = panel
+
+    def mouseDragEvent(self, event, axis=None) -> None:
+        """
+        Convert left-button drags in F-X box mode into ROI drawing gestures.
+        """
+        if (
+            self.panel.data_manager.cursor_mode == "fx_boxes"
+            and event.button() == Qt.MouseButton.LeftButton
+            and not (
+                event.modifiers()
+                & Qt.KeyboardModifier.ControlModifier
+            )
+        ):
+            point = self.mapToView(event.pos())
+
+            frequency_hz = float(point.x())
+            distance_m = float(point.y())
+
+            if event.isStart():
+                self.box_drag_started.emit(
+                    frequency_hz,
+                    distance_m,
+                )
+
+            elif event.isFinish():
+                self.box_drag_finished.emit(
+                    frequency_hz,
+                    distance_m,
+                )
+
+            else:
+                self.box_dragged.emit(
+                    frequency_hz,
+                    distance_m,
+                )
+
+            event.accept()
+            return
+
+        super().mouseDragEvent(event, axis=axis)
 
 class FXPlotPanel(QWidget):
     """
@@ -40,6 +97,11 @@ class FXPlotPanel(QWidget):
 
         # RectROI objects currently displayed for current_slice_idx.
         self.fx_slice_rois: list[pg.RectROI] = []
+        
+        # Temporary state while the user is click-dragging a new F-X ROI.
+        self._draw_roi: pg.RectROI | None = None
+        self._draw_start_frequency_hz: float | None = None
+        self._draw_start_distance_m: float | None = None
 
         self.distance_arrow = None  
         
@@ -52,9 +114,26 @@ class FXPlotPanel(QWidget):
 
         layout = QVBoxLayout(self)
 
-        self.plot_widget = pg.PlotWidget()
+        self.view_box = FXAnnotationViewBox(self)
+
+        self.plot_widget = pg.PlotWidget(
+            viewBox=self.view_box,
+        )
+        
         self.plot_widget.setBackground("w")
         self.plot_widget.setTitle("F-X plot")
+
+        self.view_box.box_drag_started.connect(
+            self._begin_draw_roi
+        )
+
+        self.view_box.box_dragged.connect(
+            self._update_draw_roi
+        )
+
+        self.view_box.box_drag_finished.connect(
+            self._finish_draw_roi
+        )
 
         plot_item = self.plot_widget.getPlotItem()
         plot_item.setLabel("bottom", "frequency", units="Hz")
@@ -432,6 +511,212 @@ class FXPlotPanel(QWidget):
 
         return roi
 
+    def _begin_draw_roi(
+        self,
+        frequency_hz: float,
+        distance_m: float,
+    ) -> None:
+        """
+        Begin drawing a new ROI from the current F-X mouse location.
+
+        A nearly zero-sized ROI is created immediately and resized while the
+        user drags.
+        """
+        if self._roi_at_position(
+            frequency_hz,
+            distance_m,
+        ) is not None:
+            return
+        
+        if self.current_slice_idx is None:
+            return
+
+        # Do not begin a second draw while one is still active.
+        if self._draw_roi is not None:
+            return
+
+        self._draw_start_frequency_hz = float(frequency_hz)
+        self._draw_start_distance_m = float(distance_m)
+
+        epsilon = 1e-6
+
+        roi = self._create_roi(
+            f_min=float(frequency_hz),
+            x_min=float(distance_m),
+            f_max=float(frequency_hz) + epsilon,
+            x_max=float(distance_m) + epsilon,
+        )
+
+        self.fx_slice_rois.append(roi)
+
+        coordinates = self.data_manager.annotation_rois_per_slice.setdefault(
+            self.current_slice_idx,
+            [],
+        )
+
+        coordinates.append((
+            float(frequency_hz),
+            float(distance_m),
+            float(frequency_hz) + epsilon,
+            float(distance_m) + epsilon,
+        ))
+
+        self._draw_roi = roi
+
+    def _update_draw_roi(
+        self,
+        frequency_hz: float,
+        distance_m: float,
+    ) -> None:
+        """Resize the currently drawn ROI as the user drags."""
+        if (
+            self._draw_roi is None
+            or self._draw_start_frequency_hz is None
+            or self._draw_start_distance_m is None
+        ):
+            return
+
+        start_f = self._draw_start_frequency_hz
+        start_x = self._draw_start_distance_m
+
+        current_f = float(frequency_hz)
+        current_x = float(distance_m)
+
+        f_min = min(start_f, current_f)
+        f_max = max(start_f, current_f)
+
+        x_min = min(start_x, current_x)
+        x_max = max(start_x, current_x)
+
+        minimum_width = 1e-6
+        minimum_height = 1e-6
+
+        self._draw_roi.setPos(
+            [f_min, x_min],
+            update=True,
+        )
+
+        self._draw_roi.setSize(
+            [
+                max(f_max - f_min, minimum_width),
+                max(x_max - x_min, minimum_height),
+            ],
+            update=True,
+        )
+
+        self._update_roi_coordinates(
+            self._draw_roi
+        )
+
+    def _finish_draw_roi(
+        self,
+        frequency_hz: float,
+        distance_m: float,
+    ) -> None:
+        """
+        Finalize one click-drag ROI.
+
+        Very small drags are discarded so ordinary clicks do not create tiny,
+        unusable ROI rectangles.
+        """
+        if self._draw_roi is None:
+            return
+
+        roi = self._draw_roi
+
+        # Clear drawing state first; deletion/update logic may run below.
+        self._draw_roi = None
+        self._draw_start_frequency_hz = None
+        self._draw_start_distance_m = None
+
+        size = roi.size()
+
+        width_hz = float(size.x())
+        height_m = float(size.y())
+
+        minimum_frequency_width_hz = 0.5
+        minimum_distance_height_m = 5.0
+
+        if (
+            width_hz < minimum_frequency_width_hz
+            or height_m < minimum_distance_height_m
+        ):
+            try:
+                roi_index = self.fx_slice_rois.index(roi)
+            except ValueError:
+                return
+
+            self.fx_slice_rois.pop(roi_index)
+
+            try:
+                self.plot_widget.removeItem(roi)
+            except Exception:
+                pass
+
+            if self.current_slice_idx is not None:
+                coordinates = (
+                    self.data_manager.annotation_rois_per_slice.get(
+                        self.current_slice_idx,
+                        [],
+                    )
+                )
+
+                if roi_index < len(coordinates):
+                    coordinates.pop(roi_index)
+
+            return
+
+        self._update_roi_coordinates(roi)
+        self._emit_roi_changed()
+
+    def promote_frequency_annotation_box_to_editable(self) -> None:
+        """
+        Convert the displayed aggregate cyan frequency guide into an editable
+        red F-X ROI for the currently selected slice.
+
+        This is used when the user enters F-X box annotation mode while
+        editing or pasting an existing annotation that only has aggregate
+        f_min/f_max bounds rather than persisted individual ROI rectangles.
+        """
+        if (
+            self.frequency_annotation_box is None
+            or self.current_slice_idx is None
+        ):
+            return
+
+        pos = self.frequency_annotation_box.pos()
+        size = self.frequency_annotation_box.size()
+
+        f_min = float(pos.x())
+        x_min = float(pos.y())
+
+        f_max = f_min + float(size.x())
+        x_max = x_min + float(size.y())
+
+        # Remove the non-editable cyan guide.
+        self.clear_frequency_annotation_box()
+
+        # Create a normal editable stored ROI.
+        roi = self._create_roi(
+            f_min=f_min,
+            x_min=x_min,
+            f_max=f_max,
+            x_max=x_max,
+        )
+
+        self.fx_slice_rois.append(roi)
+
+        coordinates = self.data_manager.annotation_rois_per_slice.setdefault(
+            self.current_slice_idx,
+            [],
+        )
+
+        coordinates.append(
+            (f_min, x_min, f_max, x_max)
+        )
+
+        self._emit_roi_changed()
+
     def _update_roi_coordinates(self, roi: pg.RectROI) -> None:
         """Write the current ROI coordinates into DataManager storage."""
         if self.current_slice_idx is None:
@@ -579,12 +864,12 @@ class FXPlotPanel(QWidget):
             # Double-click creates a new ROI.
             #
             # pyqtgraph MouseClickEvent has double() for double-click state.
-            if event.double():
-                self._add_default_roi(
-                    frequency_hz=f_click,
-                    distance_m=x_click,
-                )
-                return
+            # if event.double():
+            #     self._add_default_roi(
+            #         frequency_hz=f_click,
+            #         distance_m=x_click,
+            #     )
+            #     return
 
             return
 
@@ -702,27 +987,45 @@ class FXPlotPanel(QWidget):
     # Plot overlays / cleanup
     # =====================================================================
 
-    def mark_distance(self, distance_m: float) -> None:
-        """Mark one selected distance row across the displayed F-X plot."""
+    def mark_distance(
+        self,
+        distance_m: float,
+    ) -> None:
+        """
+        Show the currently selected spectrogram cable-distance row.
+
+        InfiniteLine spans the visible F-X view, so it remains visible while
+        zooming or panning in frequency.
+        """
         if self.distance_arrow is not None:
             try:
-                self.plot_widget.removeItem(self.distance_arrow)
+                self.plot_widget.removeItem(
+                    self.distance_arrow
+                )
             except Exception:
                 pass
 
-        if self.freq_band is None:
-            return
-
-        self.distance_arrow = pg.ScatterPlotItem(
-            x=list(self.freq_band),
-            y=[distance_m, distance_m],
-            symbol="d",
-            size=12,
-            brush="red",
-            pen="red",
+        self.distance_arrow = pg.InfiniteLine(
+            pos=float(distance_m),
+            angle=0,
+            movable=False,
+            pen=pg.mkPen(
+                color="red",
+                width=2,
+                style=Qt.PenStyle.DashLine,
+            ),
+            label="Spectrogram row",
+            labelOpts={
+                "position": 0.98,
+                "color": "red",
+                "fill": (255, 255, 255, 150),
+            },
         )
 
-        self.plot_widget.addItem(self.distance_arrow)
+        self.plot_widget.addItem(
+            self.distance_arrow,
+            ignoreBounds=True,
+        )
         
     def clear_frequency_annotation_box(self) -> None:
         """Remove the non-editable aggregate frequency annotation guide box."""

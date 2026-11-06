@@ -417,22 +417,56 @@ class TXPlotPanel(QWidget):
         self.plot_widget.addItem(l2)
         self.highlight_lines = [l1, l2]
 
-    def mark_distance(self, distance_value):
-        if hasattr(self, 'distance_arrow') and self.distance_arrow is not None:
+    def mark_distance(
+        self,
+        distance_value: float,
+    ) -> None:
+        """
+        Show the selected spectrogram cable-distance row.
+
+        The InfiniteLine spans the visible T-X plot width, so it remains visible
+        when the user zooms/pans horizontally. It is intentionally subtle so it
+        does not obscure the T-X image.
+        """
+        if (
+            hasattr(self, "distance_arrow")
+            and self.distance_arrow is not None
+        ):
             try:
-                self.plot_widget.removeItem(self.distance_arrow)
+                self.plot_widget.removeItem(
+                    self.distance_arrow
+                )
             except Exception:
                 pass
-        t0 = self.data_manager.loaded_data['t'][0]
-        tend = self.data_manager.loaded_data['t'][-1]
-        self.distance_arrow = pg.ScatterPlotItem(
-            x=[t0, tend],
-            y=[distance_value, distance_value],
-            symbol='d', size=12,
-            brush='red', pen='red'
-        )
-        self.plot_widget.addItem(self.distance_arrow)
 
+        # Light, widely spaced dotted/dashed gray line.
+        pen = pg.mkPen(
+            color=(255, 255, 255, 130),
+            width=2,
+        )
+
+        # [draw length, gap length], in pen-width units.
+        # A short mark with a long gap gives a subtle sparse dotted line.
+        pen.setDashPattern([
+            2.0,
+            4.0,
+        ])
+
+        # Keep line thickness consistent while zooming.
+        pen.setCosmetic(True)
+
+        self.distance_arrow = pg.InfiniteLine(
+            pos=float(distance_value),
+            angle=0,
+            movable=False,
+            pen=pen,
+        )
+
+        self.plot_widget.addItem(
+            self.distance_arrow,
+            ignoreBounds=True,
+        )
+        
     def set_distance_boundaries(
         self,
         distance_min_m: float | None,
@@ -908,16 +942,66 @@ class TXPlotPanel(QWidget):
         """
         Draw or replace a named hyperbola overlay.
 
-        curve_name examples:
-            "apex"
-            "endpoint"
-            "confirmed"
+        Hyperbola values are clipped to the currently loaded T-X data extent
+        before plotting. This prevents off-screen predicted arrivals from
+        affecting pyqtgraph auto-range/reset-view behaviour.
         """
         self.clear_hyperbola(curve_name)
 
+        time_values = np.asarray(
+            time_values,
+            dtype=float,
+        )
+
+        distance_values = np.asarray(
+            distance_values,
+            dtype=float,
+        )
+
+        if (
+            time_values.size == 0
+            or distance_values.size == 0
+            or time_values.shape != distance_values.shape
+        ):
+            return
+
+        t_vec = self.data_manager.loaded_data.get("t")
+        x_vec = self.data_manager.loaded_data.get("x")
+
+        if (
+            t_vec is None
+            or x_vec is None
+            or len(t_vec) == 0
+            or len(x_vec) == 0
+        ):
+            return
+
+        t_min = float(np.min(t_vec))
+        t_max = float(np.max(t_vec))
+
+        x_min = float(np.min(x_vec))
+        x_max = float(np.max(x_vec))
+
+        # Keep only finite hyperbola points that fall inside the displayed
+        # T-X image extent.
+        mask = (
+            np.isfinite(time_values)
+            & np.isfinite(distance_values)
+            & (time_values >= t_min)
+            & (time_values <= t_max)
+            & (distance_values >= x_min)
+            & (distance_values <= x_max)
+        )
+
+        if not np.any(mask):
+            return
+
+        visible_time_values = time_values[mask]
+        visible_distance_values = distance_values[mask]
+
         line_item = pg.PlotDataItem(
-            x=np.asarray(time_values, dtype=float),
-            y=np.asarray(distance_values, dtype=float),
+            x=visible_time_values,
+            y=visible_distance_values,
             pen=pg.mkPen(
                 color=color,
                 style=style,
@@ -926,6 +1010,7 @@ class TXPlotPanel(QWidget):
         )
 
         self.plot_widget.addItem(line_item)
+
         self.hyperbola_items[curve_name] = line_item
 
 

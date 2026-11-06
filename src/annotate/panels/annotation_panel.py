@@ -61,7 +61,7 @@ class AnnotationPanel(QWidget):
             "<u>E</u>: place / edit endpoint<br>"
             "<u>D</u>: select distance range<br>"
             "<u>F</u>: edit / finish F-X boxes<br>"
-            "<u>Enter</u>: save pasted or edited annotation<br>"
+            "<u>1-9</u>: assign label and save<br>"
             "<u>Esc</u>: cancel annotation"
         )
 

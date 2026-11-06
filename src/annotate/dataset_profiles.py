@@ -15,11 +15,36 @@ ANNOTATOR_DRIVES = {
 
 current_user = getpass.getuser()
 base_drive = ANNOTATOR_DRIVES.get(current_user, Path(r"D:"))
+
+def find_profile_source_file(
+    profile: DatasetProfile,
+) -> Path | None:
+    """
+    Return one available DAS file inside an annotator's assigned dataset folder.
+
+    The chosen file does not need to be the first chronological file in the
+    original dataset. DatasetService will index only the files actually present
+    in this local assignment directory.
+    """
+    if not profile.source_dir.is_dir():
+        return None
+
+    extensions = {".h5", ".hdf5", ".tdms"}
+
+    files = sorted(
+        path
+        for path in profile.source_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in extensions
+    )
+
+    return files[0] if files else None
+
 @dataclass(frozen=True)
 class DatasetProfile:
     key: str
     display_name: str
-    source_file: Path
+    source_dir: Path
     
     # None means: retain config.py / UserSettings default.
     annotation_csv: Path | None = None
@@ -62,7 +87,7 @@ class DatasetProfile:
     spec_vmax: float | None = None
 
     extra_settings: dict = field(default_factory=dict)
-   
+      
     def to_settings_dict(self) -> dict:
         """
         Return only explicitly configured profile overrides.
@@ -133,8 +158,8 @@ if MODE == "debugging":
             "dataset_1": DatasetProfile(
                 key="svalbard",
                 display_name="Svalbard",
-                source_file=Path(
-                    r"C:\Users\ers334\Desktop\testingData\Svalbard\data\120057.hdf5" 
+                source_dir=Path(
+                    r"C:\Users\ers334\Desktop\testingData\Svalbard\data" 
                 ),
                 interrogator="asn",
                 use_full_cable_length=False,
@@ -153,10 +178,9 @@ if MODE == "debugging":
             "ooi_north_c2": DatasetProfile(
                 key="ooi_north_c2",
                 display_name="OOI North C2",
-                source_file=Path(
+                source_dir=Path(
                     r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
                     r"\OptaSense\North_C2"
-                    r"\North-C2-HF-P1kHz-GL30m-Sp2m-FS500Hz_2021-11-02T215901Z.h5"
                 ),
                 interrogator="optasense",
                 use_full_cable_length=True,
@@ -175,10 +199,9 @@ if MODE == "debugging":
             "ooi_north_c3": DatasetProfile(
                 key="ooi_north_c3",
                 display_name="OOI North C3",
-                source_file=Path(
+                source_dir=Path(
                     r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
                     r"\OptaSense\blue_whales_North_C3"
-                    r"\North-C3-HF-P1kHz-GL30m-Sp2m_2021-11-02T140115Z.h5"
                 ),
                 interrogator="optasense",
                 use_full_cable_length=True,
@@ -197,10 +220,9 @@ if MODE == "debugging":
             "south_c1": DatasetProfile(
                 key="south_c1",
                 display_name="OOI South C1",
-                source_file=Path(
+                source_dir=Path(
                     r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
                     r"\OptaSense\South_C1"
-                    r"\South-C1-LR-95km-P1kHz-GL50m-SP2m-FS200Hz_2021-11-02T103714Z.h5"
                 ),
                 interrogator="optasense",
                 use_full_cable_length=True,
@@ -212,21 +234,21 @@ if MODE == "debugging":
                 sound_speed_mps=1500.0,
             ),
     
-            "ooi_silixa": DatasetProfile(
-                key="ooi_silixa",
-                display_name="OOI Silixa",
-                source_file=Path(
-                    r"C:\path\to\OOI\Silixa\example_file.tdms"
-                ),
-                interrogator="silixa",
-                use_full_cable_length=True,
-                cable_start_m=0.0,
-                cable_end_m=95_000.0,
-                target_dx_m=16.0,
-                duration_s=40.0,
-                navigation_step_s=25.0,
-                sound_speed_mps=1500.0,
-            ),
+            # "ooi_silixa": DatasetProfile(
+            #     key="ooi_silixa",
+            #     display_name="OOI Silixa",
+            #     source_dir=Path(
+            #         r"C:\path\to\OOI\Silixa"
+            #     ),
+            #     interrogator="silixa",
+            #     use_full_cable_length=True,
+            #     cable_start_m=0.0,
+            #     cable_end_m=95_000.0,
+            #     target_dx_m=16.0,
+            #     duration_s=40.0,
+            #     navigation_step_s=25.0,
+            #     sound_speed_mps=1500.0,
+            # ),
     }
 elif MODE == "training":
     pass # TODO
@@ -237,7 +259,7 @@ elif MODE == "annotating":
         "svalbard": DatasetProfile(
             key="svalbard",
             display_name="Svalbard",
-            source_file=Path(os.path.join(base_drive, r"Svalbard\090007.hdf5")),
+            source_dir=Path(os.path.join(base_drive, r"Svalbard")),
             interrogator="asn",
             use_full_cable_length=False,
             cable_start_m=20_000.0,
@@ -255,7 +277,7 @@ elif MODE == "annotating":
         "ooi_north_c2": DatasetProfile(
             key="ooi_north_c2",
             display_name="OOI North C2",
-            source_file=Path(os.path.join(base_drive, r"OOI_North_C2\North-C2-HF-P1kHz-GL30m-Sp2m-FS500Hz_2021-11-02T215231Z.h5")),
+            source_dir=Path(os.path.join(base_drive, r"OOI_North_C2")),
             interrogator="optasense",
             use_full_cable_length=True,
             cable_start_m=0,
@@ -273,11 +295,7 @@ elif MODE == "annotating":
         # "ooi_north_c3": DatasetProfile(
         #     key="ooi_north_c3",
         #     display_name="OOI North C3",
-        #     source_file=Path(
-        #         r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
-        #         r"\OptaSense\blue_whales_North_C3"
-        #         r"\North-C3-HF-P1kHz-GL30m-Sp2m_2021-11-02T140115Z.h5"
-        #     ),
+        #     source_dir=Path(os.path.join(base_drive, r"OOI_North_C3")),
         #     interrogator="optasense",
         #     use_full_cable_length=True,
         #     cable_start_m=0,
@@ -292,28 +310,28 @@ elif MODE == "annotating":
         #     sound_speed_mps=1500.0,
         # ),
 
-        # "south_c1": DatasetProfile(
-        #     key="south_c1",
+        # "ooi_south_c1": DatasetProfile(
+        #     key="ooi_south_c1",
         #     display_name="OOI South C1",
-        #     source_file=Path(
-        #         r"C:\Users\ers334\Desktop\testingData\OOI\DASData"
-        #         r"\OptaSense\South_C1"
-        #         r"\South-C1-LR-95km-P1kHz-GL50m-SP2m-FS200Hz_2021-11-02T103714Z.h5"
-        #     ),
+        #     source_dir=Path(os.path.join(base_drive, r"OOI_South_C1")),
         #     interrogator="optasense",
         #     use_full_cable_length=True,
-        #     cable_start_m=20_000.0,
-        #     cable_end_m=95_000.0,
+        #     cable_start_m=0,
+        #     cable_end_m=70_000.0,
         #     target_dx_m=16.0,
         #     duration_s=40.0,
         #     navigation_step_s=25.0,
+        #     bandpass_enabled=True,
+        #     f_lo_hz=5.0,
+        #     f_hi_hz=90.0,
+        #     fk_filter_enabled=True,
         #     sound_speed_mps=1500.0,
         # ),
 
         # "ooi_silixa": DatasetProfile(
         #     key="ooi_silixa",
         #     display_name="OOI Silixa",
-        #     source_file=Path(
+        #     source_dir=Path(
         #         r"C:\path\to\OOI\Silixa\example_file.tdms"
         #     ),
         #     # annotation_csv=Path(
@@ -333,7 +351,7 @@ elif MODE == "annotating":
         # "st_lawrence": DatasetProfile(
         #     key="st_lawrence",
         #     display_name="St. Lawrence",
-        #     source_file=Path(
+        #     source_dir=Path(
         #         r"C:\path\to\StLawrence\example_file.h5"
         #     ),
         #     interrogator="auto",

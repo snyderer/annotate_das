@@ -1,0 +1,646 @@
+You are helping maintain and extend a Python/PyQt6 DAS annotation GUI named
+"annotate_das".
+
+Please read this project context before answering. Treat it as the working
+architecture unless the attached source files show otherwise.
+
+========================================================================
+COMMUNICATION / COLLABORATION STYLE
+========================================================================
+
+The developer is an environmental/acoustics/DAS researcher and is actively
+learning Python software development. They are comfortable with scientific
+computing concepts, NumPy, signal processing, DAS data, HDF5, and GUI concepts,
+but may not be familiar with advanced Qt architecture, threading details, or
+large software-engineering conventions.
+
+When helping:
+
+1. Explain the reason for a change, not only the code.
+2. Prefer incremental, low-risk modifications over full rewrites.
+3. Identify exactly:
+   - which file to change;
+   - which method/class to change;
+   - what code should be replaced or added;
+   - any imports needed.
+4. Preserve existing behavior unless explicitly changing it.
+5. Be cautious about scientific correctness:
+   - do not silently bridge DAS data gaps;
+   - preserve absolute UTC time;
+   - preserve physical distance coordinates;
+   - do not alter processing semantics without explaining it.
+6. Do not assume files/methods exist if they are not included in the attached
+   source. Ask for the relevant file if necessary.
+7. Do not propose unsafe Qt threading patterns such as calling GUI-widget
+   methods from worker threads.
+8. Do not recommend force-pushing Git history unless explicitly necessary.
+9. When debugging, explain likely cause, then give the smallest safe fix.
+10. The developer prefers practical code examples over abstract discussion.
+
+Use concise but useful explanations. Avoid excessive boilerplate or proposing
+unnecessary frameworks.
+
+========================================================================
+PROJECT PURPOSE
+========================================================================
+
+This is a desktop DAS annotation tool for manually labeling whale calls and
+other acoustic events in Distributed Acoustic Sensing data.
+
+The GUI displays:
+
+- T-X plot:
+    Time vs cable distance DAS amplitude image.
+
+- F-X plot:
+    Frequency vs cable distance representation for one selected temporal
+    F-X slice.
+
+- F-X thumbnail series:
+    Multiple time slices of F-X data.
+
+- Spectrogram:
+    Spectrogram for one selected DAS cable-distance channel.
+
+Users annotate events by:
+
+1. selecting an apex in T-X;
+2. fitting a hyperbola using distance-to-cable;
+3. selecting/editing an endpoint;
+4. selecting two distance-side points on the hyperbola;
+5. optionally drawing F-X frequency/distance boxes;
+6. saving a label to CSV.
+
+The project uses:
+
+- Python
+- PyQt6
+- pyqtgraph
+- NumPy
+- SciPy
+- h5py
+- nptdms
+- DAS4Whales
+
+========================================================================
+IMPORTANT PROJECT CONVENTIONS
+========================================================================
+
+Coordinate conventions:
+
+- T-X:
+    x = relative time in seconds from the current loaded display window.
+    y = cable distance in meters.
+
+- F-X:
+    x = frequency in Hz.
+    y = cable distance in meters.
+
+- Spectrogram:
+    x = relative time in seconds from the current display window.
+    y = frequency in Hz.
+
+- Absolute timestamps are timezone-aware UTC datetimes.
+
+- Raw DAS array convention inside the application:
+    shape = (channel, time)
+
+- `RawDASSegment` represents raw DAS data and includes:
+    data
+    time_s
+    distance_m
+    start_time
+    fs_hz
+    dx_m
+    source_file
+    metadata
+
+- Annotation apex times are saved as absolute UTC Unix timestamps.
+
+- Displayed T-X time is relative to the current window.
+
+========================================================================
+PROJECT STRUCTURE
+========================================================================
+
+Important modules include approximately:
+
+annotate/
+    main.py
+    main_window.py
+    config.py
+    dataset_profiles.py
+    data_manager.py
+    models.py
+    label_saver.py
+
+    data/
+        dataset_reader.py
+        dataset_service.py
+        processing.py
+        window_loading.py
+        window_loader_worker.py
+
+    panels/
+        control_panel.py
+        tx_plot_panel.py
+        fx_plot_panel.py
+        fx_series_panel.py
+        spectrogram_panel.py
+        text_display_panel.py
+
+========================================================================
+DATA LOADING ARCHITECTURE
+========================================================================
+
+`DatasetService`:
+
+- Builds a metadata-only file index for a DAS dataset directory.
+- Uses `FileRecord` objects containing:
+    path
+    start_time
+    end_time
+    interrogator
+    fs_hz
+    dx_m
+    n_samples
+    n_channels
+    metadata
+- Finds files overlapping a requested absolute UTC window.
+- Loads complete source files through DAS4Whales because true temporal HDF5
+  slicing is not currently available in DAS4Whales.
+- Crops loaded source data in memory.
+- Optionally applies source-file boundary offset stitching.
+- Concatenates contiguous pieces into one `RawDASSegment`.
+
+Important limitation:
+
+DAS4Whales currently reads complete source HDF5/TDMS files. The application
+then crops requested display windows in memory. Temporal slicing may be added
+later, but is not currently available.
+
+`DatasetService` has a worker-owned byte-budget LRU cache of full raw source
+file segments:
+
+- cache key:
+    (absolute filepath, selected_channels tuple)
+
+- cache stores full `RawDASSegment` objects.
+
+- cache budget is currently roughly:
+    1 GiB
+
+- cache accounting uses:
+    `_cached_bytes`
+
+- cached source files make subsequent crop/window loads nearly instantaneous.
+
+- cache should be reset with BOTH:
+    `self._file_cache.clear()`
+    `self._cached_bytes = 0`
+
+when opening/clearing a new dataset.
+
+========================================================================
+ASYNC WINDOW LOADING
+========================================================================
+
+The project now uses a Qt worker thread for expensive DAS operations.
+
+Important components:
+
+`WindowLoadRequest`
+    Immutable request describing one desired display window.
+
+`PreparedWindow`
+    Completed result containing:
+    - raw_segment
+    - processed T-X amplitude
+    - processed time vector
+    - cable distance vector
+    - processed sampling rate
+    - F-X arrays/data
+
+`WindowLoaderWorker`
+    A QObject moved into a dedicated QThread.
+
+The worker owns its own `DatasetService` and its own source-file cache.
+
+This is intentional. Do NOT pass the GUI/main-thread `DatasetService` into a
+worker thread.
+
+Worker performs:
+
+1. Ensure worker-owned dataset service is opened/indexed.
+2. Load raw source file(s).
+3. Use worker source-file RAM cache where possible.
+4. Crop/stitch/concatenate requested raw window.
+5. Apply processing:
+   bandpass, F-K, decimation/display processing.
+6. Build F-X results.
+7. Emit `PreparedWindow`.
+
+The GUI/main thread installs completed results into `DataManager` and emits
+`dataset_loaded`.
+
+The worker must never manipulate Qt widgets.
+
+`DataManager` owns:
+
+- visible/current window state;
+- loaded_data;
+- current_start_time;
+- visible F-X state;
+- the worker QThread and worker QObject;
+- async request IDs;
+- one fully processed forward-prefetch result.
+
+========================================================================
+STALE REQUEST PROTECTION
+========================================================================
+
+Async visible requests use incrementing request IDs.
+
+Old worker results must not overwrite a newer requested window.
+
+When changing dataset, important settings, duration, cable selection, etc.,
+pending requests/prefetch should be invalidated rather than force-killing an
+active HDF5/NumPy operation.
+
+Do not terminate a QThread in the middle of HDF5 or NumPy work.
+
+========================================================================
+FORWARD PREFETCHING
+========================================================================
+
+The application has forward prefetching.
+
+Workflow:
+
+1. A visible window finishes loading.
+2. After a short delay, the application prepares:
+       current_start_time + navigation_step_s
+3. The worker loads and fully processes that next likely window.
+4. If user presses Forward after prefetch completes:
+       prefetch result is installed almost instantly.
+5. If user presses Forward while prefetch is still running:
+       the prefetch is promoted to the active visible request rather than
+       performing duplicate loading.
+6. After a prefetched window is installed, the next forward window is
+   prefetched.
+
+This hides raw DAS file load and processing time while the annotator works.
+
+The prefetch stores a FULLY processed `PreparedWindow`, not merely raw data,
+because processing takes approximately 9–12 seconds and is a significant
+bottleneck.
+
+Do not accidentally submit duplicate requests for the same forward window.
+
+Do not emit a visible “loading” UI signal merely because speculative prefetch
+starts. Visible loading state should be for user-requested windows.
+
+========================================================================
+PERFORMANCE FINDINGS
+========================================================================
+
+Measured typical timings:
+
+Dataset with ~30-second source files:
+- source HDF5 file size: approximately 233 MiB
+- uncached source-file load: approximately 8–10 seconds
+- cached source-file load: near zero seconds
+- processing: approximately 9–11 seconds
+- F-X: less than 1 second
+
+Dataset with ~10-second source files:
+- source HDF5 file size: approximately 117 MiB
+- uncached source-file load: approximately 12–15 seconds
+- a 30–40 second display window may span 3–4 source files
+- processing: approximately 10–12 seconds
+- F-X: less than 1 second
+
+Forward prefetch made ordinary forward navigation feel nearly immediate once
+the next window had been prepared.
+
+Do not prioritize parallel HDF5 file loading without profiling. The files may
+be read from one SSD/USB device, so parallel reads could compete for bandwidth,
+increase RAM pressure, and complicate HDF5/DAS4Whales safety. The existing
+prefetch strategy is currently more valuable.
+
+========================================================================
+DATASET PROFILES
+========================================================================
+
+`dataset_profiles.py` contains dataset-specific acquisition and processing
+settings.
+
+Profiles may vary by:
+
+- interrogator type;
+- cable range;
+- target spatial decimation;
+- duration;
+- navigation step;
+- bandpass;
+- F-K filtering;
+- sound speed;
+- F-X settings.
+
+The app has modes configured through `MODE` in `config.py`, such as:
+
+- debugging
+- training
+- skill_assessment
+- annotating
+
+The project is transitioning from profiles with one fixed source file to
+profiles/chunk folders because datasets are distributed across annotators.
+
+========================================================================
+DIVVIED DATA / CHUNK ASSIGNMENTS
+========================================================================
+
+DAS files may be divided among multiple annotators.
+
+Annotators include approximately:
+
+- xd264 -> E:\
+- ipf6  -> I:\
+- mmv52 -> M:\
+
+The desired distributed-data layout is chunk-based:
+
+E:\
+    Svalbard\
+        chunk_primary_b000_f00\
+        chunk_overlap_xd264__ipf6_b003\
+        ...
+
+I:\
+    Svalbard\
+        ...
+
+M:\
+    Svalbard\
+        ...
+
+Each chunk directory should contain contiguous DAS source files plus context
+padding before and after the core assignment.
+
+Chunk concepts:
+
+- Core range:
+    Files/time range that the annotator is responsible for labeling.
+
+- Context padding:
+    Additional copied files before/after the core range so calls near chunk
+    boundaries can be seen and annotated fully.
+
+Typical settings:
+
+- Core chunk/block duration:
+    approximately 30 minutes.
+
+- Pairwise overlap:
+    approximately 10 minutes per annotator pair.
+
+- Context padding:
+    approximately 60 seconds before/after each chunk, possibly more if long
+    calls require it.
+
+Each chunk may contain a `chunk_manifest.json` recording:
+
+- annotator;
+- dataset;
+- chunk ID;
+- role: primary or overlap;
+- overlap pair;
+- core file indices/files;
+- copied context files;
+- core/copy boundaries;
+- padding duration.
+
+Scientific/assignment rule:
+
+A label should eventually be considered owned by a chunk based on apex time
+being inside the chunk's core time range, even though context files may overlap
+with neighboring chunks.
+
+Avoid presenting a local annotator directory containing many separated 30-minute
+blocks as one contiguous dataset. That creates artificial gaps and makes
+annotation at boundaries difficult.
+
+Preferred approach:
+
+- Each GUI-opened chunk is contiguous.
+- Open one chunk folder at a time.
+- Do not make the GUI silently stitch artificial assignment gaps.
+
+========================================================================
+ANNOTATION WORKFLOW
+========================================================================
+
+Main annotation stages include:
+
+- apex selection;
+- hyperbola fitting;
+- endpoint selection;
+- distance-side point selection;
+- F-X boxes;
+- save label.
+
+Keyboard behavior includes roughly:
+
+- A: apex selection/confirmation/editing
+- H: hyperbola fitting
+- E: endpoint editing
+- D: distance points
+- F: F-X box annotation
+- Space: next relevant F-X slice in F-X annotation mode
+- number keys: save labels
+- Ctrl+C / Ctrl+V: annotation copy/paste
+- Delete: delete selected existing annotation
+- Esc: cancel/reset current annotation
+
+Hyperbola calculation uses the straight-cable acoustic approximation:
+
+    range = sqrt(
+        (cable_distance - apex_distance)^2
+        + distance_to_cable^2
+    )
+
+    arrival_time =
+        apex_time
+        + (range - distance_to_cable) / sound_speed
+
+When plotting hyperbolas, clip them to the loaded T-X extent so off-screen
+predicted arrivals do not distort pyqtgraph auto-range/reset-view behavior.
+
+========================================================================
+F-X ROI BEHAVIOR
+========================================================================
+
+F-X annotation boxes use `pyqtgraph.RectROI`.
+
+Desired behavior:
+
+- drag inside ROI -> move ROI;
+- drag handles/corners -> resize ROI;
+- Ctrl-click ROI -> delete ROI;
+- click-drag empty F-X plot area -> create/draw a new ROI;
+- saved/copied aggregate frequency bounds may initially display as a guide,
+  but should be convertible into editable ROIs in F-X editing mode.
+
+ROI coordinates are stored in:
+
+    data_manager.annotation_rois_per_slice
+
+Typically keyed by F-X slice index.
+
+Aggregate `f_min` and `f_max` are computed from all saved ROI rectangles.
+
+========================================================================
+CURSOR CROSSHAIRS / PLOT SYNCHRONIZATION
+========================================================================
+
+The GUI has or is implementing synchronized mouse cursor guides.
+
+Desired behavior:
+
+Mouse over T-X:
+- T-X: vertical time guide + horizontal distance guide;
+- F-X: horizontal distance guide;
+- spectrogram: vertical time guide.
+
+Mouse over F-X:
+- F-X: vertical frequency guide + horizontal distance guide;
+- T-X: horizontal distance guide;
+- spectrogram: horizontal frequency guide.
+
+Mouse over spectrogram:
+- spectrogram: vertical time guide + horizontal frequency guide;
+- T-X: vertical time guide;
+- F-X: vertical frequency guide.
+
+Crosshairs should use subtle gray `pg.InfiniteLine` objects and should not
+interfere with annotation interaction.
+
+Each plot panel must connect:
+
+    plot_widget.scene().sigMouseMoved.connect(
+        self._on_scene_mouse_moved
+    )
+
+A common bug is implementing `_on_scene_mouse_moved()` but forgetting to
+connect it.
+
+========================================================================
+SPECTROGRAM ROW INDICATOR
+========================================================================
+
+Selecting a spectrogram row should show a subtle horizontal guide on the T-X
+plot at the selected cable distance.
+
+Use `pg.InfiniteLine`, not endpoint markers, so it remains visible during
+horizontal zoom/pan.
+
+The developer prefers:
+
+- no label box;
+- no bright red opaque line;
+- subtle gray dotted/dashed line;
+- relatively visible but not data-obscuring.
+
+Qt color alpha convention:
+
+    (red, green, blue, alpha)
+
+Alpha range:
+
+    0   = fully transparent
+    255 = fully opaque
+
+Dash pattern:
+
+    pen.setDashPattern([draw_length, gap_length])
+
+uses relative units based on pen width, approximately pixels for cosmetic
+1-pixel pens.
+
+========================================================================
+CSV ANNOTATIONS
+========================================================================
+
+Annotations are saved through `LabelSaver`.
+
+CSV may be shared across datasets and includes fields such as:
+
+- dataset_key;
+- dataset;
+- source_file;
+- apex_time_utc;
+- apex_time_str;
+- apex_time_s;
+- apex_dist;
+- duration;
+- sound_speed_mps;
+- distance_to_cable;
+- dist_min;
+- dist_max;
+- f_min;
+- f_max;
+- label;
+- label_name;
+- label_code.
+
+Default output path should be user-independent, e.g.:
+
+    Path.home() / "Desktop" / "DAS" / "annotations.csv"
+
+converted to `str(...)` when given to Qt widgets such as `QLineEdit`.
+
+========================================================================
+WHEN ASKED TO IMPLEMENT A CHANGE
+========================================================================
+
+Before proposing code:
+
+1. Identify affected modules.
+2. Check whether the change touches:
+   - GUI/main Qt thread;
+   - worker thread;
+   - processing/data state;
+   - saved annotation format;
+   - chunk/distributed-data logic.
+3. Preserve thread ownership:
+   - GUI widgets only in GUI thread;
+   - worker DatasetService only in worker thread.
+4. Preserve absolute UTC time and physical cable coordinates.
+5. State whether the change affects:
+   - prefetch cache validity;
+   - source-file cache;
+   - current annotation workflows;
+   - saved label compatibility.
+
+When source files are attached, review the actual code rather than relying only
+on this context.
+
+========================================================================
+CURRENT DEVELOPMENT PRIORITIES
+========================================================================
+
+Current priorities are generally:
+
+1. Reliable annotation behavior.
+2. Simple chunk-based distributed data workflow.
+3. Smooth forward navigation/prefetch.
+4. Clear plotting and annotation usability.
+5. Preserve scientific correctness and data provenance.
+
+Do not add unnecessary parallel HDF5 loading, disk caches, databases, web
+frameworks, or major architectural rewrites unless specifically requested.
+
+========================================================================
+END PROJECT CONTEXT
+========================================================================

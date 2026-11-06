@@ -814,13 +814,21 @@ class DataManager(QObject):
             f"total={total_elapsed:.3f}s"
         )
     
-    def navigate(self, direction: str) -> None:
-        """Move the current display window by the configured step size."""
+    def navigate(
+        self,
+        direction: str,
+    ) -> None:
+        """Move the current display window by configured navigation step."""
         if self.current_start_time is None:
-            raise RuntimeError("Open a dataset before navigating.")
+            raise RuntimeError(
+                "Open a dataset before navigating."
+            )
 
         step_s = float(
-            self.user_settings.get("navigation_step_s", 30.0)
+            self.user_settings.get(
+                "navigation_step_s",
+                30.0,
+            )
         )
 
         if direction == "forward":
@@ -835,6 +843,26 @@ class DataManager(QObject):
         requested_start = self.current_start_time + timedelta(
             seconds=delta_s
         )
+
+        available_time = self.dataset_service.next_available_time(
+            requested_start
+        )
+
+        if available_time is None:
+            raise ValueError(
+                "No later assigned DAS data are available."
+            )
+
+        # Requested timestamp falls in a locally absent assignment gap.
+        if available_time != requested_start:
+            self.window_loading_failed.emit(
+                "Assignment gap encountered.\n\n"
+                f"Requested: {requested_start.isoformat()}\n"
+                f"Next assigned data begin: "
+                f"{available_time.isoformat()}\n\n"
+                "Use the start-time control to jump to the next block."
+            )
+            return
 
         self.request_window_async(requested_start)
             
