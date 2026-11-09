@@ -1,0 +1,7 @@
+dataset_key,annotator,primary_chunks,primary_core_hours,primary_copied_hours,verification_chunks,verification_core_hours,verification_copied_hours,total_core_hours
+ooi_north_c2,xd264,2,1.0,1.05,1,0.5,0.5333,1.5
+ooi_north_c2,ipf6,2,0.625,0.675,1,0.5,0.5333,1.125
+ooi_north_c2,mmv52,1,0.5,0.5333,0,0.0,0.0,0.5
+svalbard,xd264,3,1.3667,1.4167,1,0.35,0.3667,1.7167
+svalbard,ipf6,3,1.1361,1.2028,1,0.35,0.3667,1.4861
+svalbard,mmv52,3,0.8917,0.9417,0,0.0,0.0,0.8917

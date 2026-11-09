@@ -1,0 +1,2 @@
+tx_id,uid,apex_time_utc,apex_time_str,apex_time_s,sound_speed_mps,apex_dist,duration,distance_to_cable,dist_max,dist_min,f_max,f_min,label,label_name,dataset,source_file,saved_timestamp,username
+1,12a749ce-a768-44bb-b651-977c14c8fd31,1661159502.0833354,2022-08-22 09:11:42.083 UTC,1661159502.0833354,1480.0,56163.340091081285,2.3494912027270303,837.0,66686.8172568236,41211.50529813995,26.782200874273933,17.6471006611275,1,Fin - 20 Hz,data,\\ag-clo-sa36102.ad.cornell.edu\U2\projects\2022_CLOCCB_OR_S1113\Svalbard\data\091137.hdf5,2026-09-29 16:33:11.565,ers334

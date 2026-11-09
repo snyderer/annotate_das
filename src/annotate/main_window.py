@@ -39,9 +39,13 @@ from annotate.panels.fx_series_panel import FXSeriesPanel
 from annotate.panels.spectrogram_panel import SpectrogramPanel
 from annotate.panels.text_display_panel import TextDisplayPanel
 from annotate.panels.tx_plot_panel import TXPlotPanel
-from annotate.dataset_profiles import DATASET_PROFILES, DatasetProfile
 from annotate.config import UserSettings
-from annotate.dataset_profiles import find_profile_source_file
+from annotate.dataset_profiles import (
+    DATASET_PROFILES,
+    DatasetProfile,
+    find_profile_source_file,
+)
+
 
 class MainWindow(QMainWindow):
     """
