@@ -16,15 +16,6 @@ ANNOTATOR_DRIVES: dict[str, Path] = {
     "xd264": Path("G:/"),
     "ipf6": Path("H:/"),
     "mmv52": Path("I:/"),
-
-    # Your own development/reviewer location.
-    #
-    # If you want an independent copy of QA chunks, this should ideally be a
-    # separate directory from ipf6's normal assigned-data root.
-    #
-    # Example:
-    # "ers334": Path("H:/ers334_review"),
-    #
     "ers334": Path("H:/"),
 }
 
