@@ -13,9 +13,9 @@ from annotate.config import MODE
 # ============================================================================
 
 ANNOTATOR_DRIVES: dict[str, Path] = {
-    "xd264": Path("G:/"),
+    "xd264": Path("E:/"),
     "ipf6": Path("H:/"),
-    "mmv52": Path("I:/"),
+    "mmv52": Path("D:/"),
     "ers334": Path("H:/"),
 }
 

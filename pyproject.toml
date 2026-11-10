@@ -15,8 +15,9 @@ dependencies = [
     "pandas",
     "pyqtgraph",
     "matplotlib",
-    "das4whales"
-]
+    "das4whales",
+    "simpleDAS @ git+https://github.com/qgoestch/simpleDAS.git",
+    ]
 
 [project.scripts]
 annotate = "annotate.main:run"
