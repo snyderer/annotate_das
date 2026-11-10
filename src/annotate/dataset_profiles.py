@@ -16,7 +16,7 @@ ANNOTATOR_DRIVES: dict[str, Path] = {
     "xd264": Path("E:/"),
     "ipf6": Path("H:/"),
     "mmv52": Path("D:/"),
-    "ers334": Path("H:/"),
+    "ers334": Path("I:/"),
 }
 
 CURRENT_USER = getpass.getuser().strip().lower()
@@ -418,7 +418,6 @@ def build_chunk_profiles(
                 display_name=(
                     f"{defaults['display_name']} — "
                     f"{chunk_id.replace('_', ' ').title()} "
-                    f"[{assignment_role}]"
                 ),
 
                 source_dir=chunk_dir,
